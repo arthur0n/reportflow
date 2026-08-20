@@ -1,0 +1,9 @@
+node_modules/
+dist/
+build/
+.aws-sam/
+drizzle/meta/
+drizzle/*.sql
+pnpm-lock.yaml
+*.tsbuildinfo
+coverage/

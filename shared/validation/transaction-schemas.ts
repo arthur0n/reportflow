@@ -1,0 +1,40 @@
+import { z } from "zod/v4";
+
+export const CreateTransactionInput = z.object({
+  businessUnitId: z.string().uuid().optional(),
+  transactionTypeId: z.string().uuid(),
+  creditorId: z.string().uuid().optional(),
+  categoryId: z.string().uuid().optional(),
+  paymentMethodId: z.string().uuid().optional(),
+  subtypeId: z.string().uuid().optional(),
+  cashBoxId: z.string().uuid().optional(),
+  accrualDate: z.string().date(),
+  dueDate: z.string().date(),
+  actualDate: z.string().date().optional(),
+  forecastAmount: z.number().int(),
+  actualAmount: z.number().int().optional(),
+  statusId: z.string().uuid().optional(),
+  description: z.string().trim().max(1000).optional(),
+  reference: z.string().trim().max(80).optional(),
+  externalId: z.string().trim().max(100).optional(),
+});
+
+export const UpdateTransactionInput = z.object({
+  id: z.string().uuid(),
+  businessUnitId: z.string().uuid().optional(),
+  transactionTypeId: z.string().uuid().optional(),
+  creditorId: z.string().uuid().nullable().optional(),
+  categoryId: z.string().uuid().nullable().optional(),
+  paymentMethodId: z.string().uuid().nullable().optional(),
+  subtypeId: z.string().uuid().nullable().optional(),
+  cashBoxId: z.string().uuid().nullable().optional(),
+  accrualDate: z.string().date().optional(),
+  dueDate: z.string().date().optional(),
+  actualDate: z.string().date().nullable().optional(),
+  forecastAmount: z.number().int().optional(),
+  actualAmount: z.number().int().nullable().optional(),
+  statusId: z.string().uuid().optional(),
+  description: z.string().trim().max(1000).nullable().optional(),
+  reference: z.string().trim().max(80).nullable().optional(),
+  externalId: z.string().trim().max(100).nullable().optional(),
+});

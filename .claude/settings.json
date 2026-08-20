@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/block-deploy.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/lint-changed.sh"
+          },
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/migrate-reminder.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,106 @@
+import type { ReactElement } from "react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { trpc } from "@/shared/lib/trpc";
+import { toast } from "sonner";
+import {
+  TENANT_VALUE_KIND_CONFIG,
+  type TenantValueKind,
+} from "@shared/constants/tenant-value-kinds";
+
+export type DeactivableTenantValue = {
+  id: string;
+  name: string;
+};
+
+export function DeactivateTenantValueDialog({
+  kind,
+  tenantValue,
+  open,
+  onOpenChange,
+}: {
+  kind: TenantValueKind;
+  tenantValue: DeactivableTenantValue | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}): ReactElement {
+  const utils = trpc.useUtils();
+  const cfg = TENANT_VALUE_KIND_CONFIG[kind];
+  const labelLower = cfg.labelOne.toLowerCase();
+
+  const countQuery = trpc.tenantValues.transactionsCount.useQuery(
+    tenantValue ? { kind, ids: [tenantValue.id] } : { kind, ids: [""] },
+    { enabled: tenantValue !== null && open && cfg.txColumn !== null },
+  );
+
+  const deactivate = trpc.tenantValues.deactivate.useMutation({
+    onSuccess: () => {
+      void utils.tenantValues.invalidate();
+      toast.success(`${cfg.labelOne} inativado.`);
+      onOpenChange(false);
+    },
+    onError: (err) => {
+      toast.error(err.message);
+    },
+  });
+
+  const counts = countQuery.data?.[0] ?? { activeCount: 0, inactiveCount: 0 };
+  const showImpact = cfg.txColumn !== null;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            Inativar {labelLower} “{tenantValue?.name ?? ""}”?
+          </DialogTitle>
+        </DialogHeader>
+        <div className="flex flex-col gap-3">
+          <p className="text-[length:var(--fs-body-sm)] text-[color:var(--ink-soft)]">
+            {cfg.labelOne}s inativos não aparecem em dropdowns de novas transações. Transações já
+            lançadas continuam vinculadas normalmente.
+          </p>
+          {showImpact && (
+            <p className="text-[length:var(--fs-body-sm)] text-[color:var(--ink-soft)]">
+              {countQuery.isLoading
+                ? "Carregando impacto…"
+                : counts.activeCount === 0 && counts.inactiveCount === 0
+                  ? `Nenhuma transação referencia este ${labelLower}.`
+                  : `Este ${labelLower} está em ${counts.activeCount} transação(ões) ativa(s)` +
+                    (counts.inactiveCount > 0 ? ` e ${counts.inactiveCount} inativa(s)` : "") +
+                    "."}
+            </p>
+          )}
+        </div>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => {
+              onOpenChange(false);
+            }}
+            disabled={deactivate.isPending}
+          >
+            Cancelar
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            onClick={() => {
+              if (tenantValue) deactivate.mutate(tenantValue.id);
+            }}
+            disabled={deactivate.isPending || tenantValue === null}
+          >
+            {deactivate.isPending ? "Inativando…" : "Inativar"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}

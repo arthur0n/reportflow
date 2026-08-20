@@ -3,10 +3,41 @@ docs/design/
 pdf/
 **/__fixtures__/real-*
 
+# Dependencies
 node_modules/
+.pnpm-store/
+
+# Build outputs
 dist/
+build/
 .aws-sam/
+*.tsbuildinfo
+
+# Env / secrets (never commit)
 .env
 .env.*
-*.log
+!.env.example
+
+# Claude Code per-user settings (permissions, local overrides)
+.claude/settings.local.json
+
+# Editor / OS
 .DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Testing
+coverage/
+*.lcov
+.vitest-cache/

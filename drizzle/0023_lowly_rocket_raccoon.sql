@@ -1,0 +1,1 @@
+ALTER TABLE "statement_import_rows" ADD COLUMN "accrual_date" date;

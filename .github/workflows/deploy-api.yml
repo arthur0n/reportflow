@@ -1,0 +1,53 @@
+name: Deploy API
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "api/**"
+      - "drizzle/**"
+      - "shared/**"
+      - "template.yaml"
+      - "samconfig.toml"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/deploy-api.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: PROD
+    env:
+      AWS_REGION: sa-east-1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+
+      - run: pnpm install --frozen-lockfile
+
+      - uses: aws-actions/setup-sam@v2
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - run: npm install -g esbuild
+
+      - run: sam build
+
+      - run: sam deploy --no-confirm-changeset --no-fail-on-empty-changeset

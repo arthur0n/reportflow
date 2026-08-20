@@ -1,0 +1,2 @@
+ALTER TABLE "questions_and_feedback" ADD COLUMN "feature" varchar(50);--> statement-breakpoint
+CREATE INDEX "qf_feature_idx" ON "questions_and_feedback" USING btree ("feature") WHERE "questions_and_feedback"."deleted_at" IS NULL AND "questions_and_feedback"."feature" IS NOT NULL;

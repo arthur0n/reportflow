@@ -1,0 +1,338 @@
+import { useState, type ReactElement, type ReactNode } from "react";
+import { Link, Redirect, useLocation } from "wouter";
+import { UserMenu } from "@/auth";
+import { ChevronDown, Menu, X } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { PeriodSelector } from "@/components/ui/period-selector";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { trpc } from "@/shared/lib/trpc";
+import { usePeriod } from "@/shared/period";
+import { TenantSwitcher } from "@/components/layout/TenantSwitcher";
+import { MEMBERSHIP_RANK } from "@shared/constants/membership-roles";
+
+type NavLeaf = { readonly href: string; readonly label: string };
+
+type NavItem =
+  | {
+      readonly kind: "link";
+      readonly href: string;
+      readonly label: string;
+      readonly requiredRank?: number;
+    }
+  | {
+      readonly kind: "group";
+      readonly label: string;
+      readonly matchPrefixes: readonly string[];
+      readonly groups: readonly (readonly NavLeaf[])[];
+      readonly requiredRank?: number;
+    };
+
+const NAV_ITEMS: readonly NavItem[] = [
+  { kind: "link", href: "/dashboard", label: "Painel" },
+  { kind: "link", href: "/transactions", label: "Transações" },
+  { kind: "link", href: "/imports", label: "Importações" },
+  { kind: "link", href: "/conciliation", label: "Conciliação" },
+  { kind: "link", href: "/reports", label: "Relatórios" },
+  {
+    kind: "group",
+    label: "Parâmetros",
+    matchPrefixes: ["/parameters", "/categories"],
+    groups: [
+      [
+        { href: "/categories", label: "Categorias" },
+        { href: "/parameters/payment-methods", label: "Formas de Pagamento" },
+        { href: "/parameters/import-rules", label: "Regras de Importação" },
+      ],
+      [
+        { href: "/parameters/tenant-values/business-unit", label: "Unidades" },
+        { href: "/parameters/tenant-values/supplier", label: "Fornecedores" },
+        { href: "/parameters/tenant-values/customer", label: "Clientes" },
+        { href: "/parameters/tenant-values/cash-box", label: "Caixas" },
+      ],
+    ],
+  },
+  { kind: "link", href: "/feedback", label: "Feedback" },
+  { kind: "link", href: "/settings/tenant", label: "Configurações" },
+  {
+    kind: "group",
+    label: "Admin",
+    matchPrefixes: ["/admin"],
+    requiredRank: MEMBERSHIP_RANK.REPORTFLOW,
+    groups: [
+      [
+        { href: "/admin/customers/new", label: "Novo cliente" },
+        { href: "/admin/lov", label: "Catálogo LOV" },
+        { href: "/admin/lov-candidates", label: "Candidatos LOV" },
+        { href: "/admin/match-rules-system", label: "Regras de Sistema" },
+      ],
+    ],
+  },
+];
+
+// Surfaces available while the tenant is in import-only mode: the imports +
+// conciliation flow, plus settings so the admin can graduate to full mode.
+const IMPORT_ONLY_PREFIXES = ["/imports", "/conciliation", "/settings/tenant"] as const;
+
+function isImportOnlyAllowed(href: string): boolean {
+  return IMPORT_ONLY_PREFIXES.some((p) => href === p || href.startsWith(`${p}/`));
+}
+
+function visibleNavItems(
+  items: readonly NavItem[],
+  role: number | null,
+  tenantMode: string | null,
+): readonly NavItem[] {
+  const byRank =
+    role === null
+      ? items.filter((item) => item.requiredRank === undefined)
+      : items.filter((item) => item.requiredRank === undefined || role <= item.requiredRank);
+  if (tenantMode !== "import_only") return byRank;
+  return byRank.filter((item) => item.kind === "link" && isImportOnlyAllowed(item.href));
+}
+
+function isActivePath(href: string, location: string): boolean {
+  if (href === "/dashboard") return location === "/dashboard" || location === "/";
+  return location === href || location.startsWith(`${href}/`);
+}
+
+function isGroupActive(prefixes: readonly string[], location: string): boolean {
+  return prefixes.some((p) => location === p || location.startsWith(`${p}/`));
+}
+
+const navLinkClass =
+  "relative inline-flex h-7 items-center text-[length:var(--fs-eyebrow)] uppercase tracking-[0.12em] font-[550] transition-colors whitespace-nowrap";
+
+export function AppLayout({ children }: { children: ReactNode }): ReactElement {
+  const [location] = useLocation();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const me = trpc.users.me.useQuery(undefined, { staleTime: 60_000 });
+  const { period, setPeriod } = usePeriod();
+  const tenantMode = me.data?.activeTenantMode ?? null;
+  const navItems = visibleNavItems(NAV_ITEMS, me.data?.role ?? null, tenantMode);
+
+  // AppLayout wraps every protected page, so this is the single route gate
+  // for import-only mode: anything outside the whitelist bounces to imports.
+  if (tenantMode === "import_only" && !isImportOnlyAllowed(location)) {
+    return <Redirect to="/imports" />;
+  }
+
+  return (
+    <div className="min-h-screen bg-[color:var(--paper)]">
+      <header className="sticky top-0 z-30 bg-[color:var(--paper)]/95 backdrop-blur-[2px] border-b border-[color:var(--rule-strong)]">
+        <div className="mx-auto w-full max-w-[1600px] px-6 lg:px-10">
+          <div className="flex items-center gap-6 lg:gap-10 py-3">
+            <Link
+              href="/dashboard"
+              className="font-serif italic font-[500] text-[1.25rem] leading-none tracking-[-0.02em] text-[color:var(--ink)] hover:text-[color:var(--accent)] transition-colors shrink-0"
+            >
+              ReportFlow
+            </Link>
+
+            <nav
+              className="hidden lg:flex items-center gap-5 xl:gap-6 flex-1 min-w-0"
+              aria-label="Seções"
+            >
+              {navItems.map((item) => {
+                if (item.kind === "link") {
+                  const active = isActivePath(item.href, location);
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      className={cn(
+                        navLinkClass,
+                        active
+                          ? "text-[color:var(--ink)]"
+                          : "text-[color:var(--ink-mute)] hover:text-[color:var(--ink)]",
+                      )}
+                    >
+                      {item.label}
+                      <span
+                        aria-hidden
+                        className={cn(
+                          "absolute left-0 right-0 -bottom-[11px] h-[2px]",
+                          "bg-[color:var(--accent)]",
+                          "origin-left transition-transform duration-300 ease-[var(--ease-out-quart)]",
+                          active ? "scale-x-100" : "scale-x-0",
+                        )}
+                      />
+                    </Link>
+                  );
+                }
+
+                const active = isGroupActive(item.matchPrefixes, location);
+                return (
+                  <DropdownMenu key={item.label}>
+                    <DropdownMenuTrigger
+                      className={cn(
+                        navLinkClass,
+                        "gap-1 outline-none focus-visible:text-[color:var(--ink)]",
+                        active
+                          ? "text-[color:var(--ink)]"
+                          : "text-[color:var(--ink-mute)] hover:text-[color:var(--ink)]",
+                      )}
+                    >
+                      {item.label}
+                      <ChevronDown
+                        aria-hidden
+                        className="h-3 w-3 transition-transform duration-200 data-[state=open]:rotate-180"
+                      />
+                      <span
+                        aria-hidden
+                        className={cn(
+                          "absolute left-0 right-0 -bottom-[11px] h-[2px]",
+                          "bg-[color:var(--accent)]",
+                          "origin-left transition-transform duration-300 ease-[var(--ease-out-quart)]",
+                          active ? "scale-x-100" : "scale-x-0",
+                        )}
+                      />
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start" sideOffset={12} className="min-w-[14rem]">
+                      {item.groups.map((leaves, idx) => (
+                        <div key={idx}>
+                          {idx > 0 && <DropdownMenuSeparator />}
+                          {leaves.map((leaf) => {
+                            const itemActive = isActivePath(leaf.href, location);
+                            return (
+                              <DropdownMenuItem
+                                key={leaf.href}
+                                asChild
+                                className={cn(
+                                  "cursor-pointer text-[length:var(--fs-body-sm)]",
+                                  itemActive &&
+                                    "bg-[color:var(--paper-sink)] text-[color:var(--ink)]",
+                                )}
+                              >
+                                <Link href={leaf.href}>{leaf.label}</Link>
+                              </DropdownMenuItem>
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                );
+              })}
+            </nav>
+
+            <div className="flex items-center gap-4 lg:gap-5 ml-auto lg:ml-0 shrink-0">
+              <div className="hidden sm:block">
+                <PeriodSelector size="compact" value={period} onChange={setPeriod} />
+              </div>
+              <div className="h-5 w-px bg-[color:var(--rule)] hidden sm:block" aria-hidden />
+              <div className="hidden md:flex items-center gap-2 text-[length:var(--fs-body-sm)]">
+                {me.data?.activeTenantName != null && (
+                  <span className="rounded-[var(--radius-sm)] bg-[color:var(--paper-sink)] px-2 py-0.5 text-[color:var(--ink)]">
+                    {me.data.activeTenantName}
+                  </span>
+                )}
+                {me.data?.name != null && (
+                  <span className="text-[color:var(--ink-mute)]">{me.data.name}</span>
+                )}
+              </div>
+              <TenantSwitcher />
+              <UserMenu />
+              <button
+                type="button"
+                className="lg:hidden inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-sm)] text-[color:var(--ink)] hover:bg-[color:var(--paper-sink)]"
+                aria-label={drawerOpen ? "Fechar menu" : "Abrir menu"}
+                onClick={() => {
+                  setDrawerOpen((v) => !v);
+                }}
+              >
+                {drawerOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
+              </button>
+            </div>
+          </div>
+
+          {drawerOpen && (
+            <nav
+              className="lg:hidden flex flex-col py-2 gap-0.5 animate-in fade-in-50 slide-in-from-top-1 border-t border-[color:var(--rule)]"
+              aria-label="Seções"
+            >
+              {navItems.map((item) => {
+                if (item.kind === "link") {
+                  const active = isActivePath(item.href, location);
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      onClick={() => {
+                        setDrawerOpen(false);
+                      }}
+                      className={cn(
+                        "px-2 py-2.5 border-b border-[color:var(--rule)] last:border-b-0",
+                        "text-[length:var(--fs-eyebrow)] uppercase tracking-[0.12em] font-[550]",
+                        active ? "text-[color:var(--accent)]" : "text-[color:var(--ink-mute)]",
+                      )}
+                    >
+                      {item.label}
+                    </Link>
+                  );
+                }
+
+                const groupActive = isGroupActive(item.matchPrefixes, location);
+                return (
+                  <div
+                    key={item.label}
+                    className="border-b border-[color:var(--rule)] last:border-b-0"
+                  >
+                    <div
+                      className={cn(
+                        "px-2 pt-2.5 pb-1 text-[length:var(--fs-eyebrow)] uppercase tracking-[0.12em] font-[550]",
+                        groupActive ? "text-[color:var(--accent)]" : "text-[color:var(--ink-mute)]",
+                      )}
+                    >
+                      {item.label}
+                    </div>
+                    <div className="flex flex-col pb-1.5">
+                      {item.groups.flat().map((leaf) => {
+                        const leafActive = isActivePath(leaf.href, location);
+                        return (
+                          <Link
+                            key={leaf.href}
+                            href={leaf.href}
+                            onClick={() => {
+                              setDrawerOpen(false);
+                            }}
+                            className={cn(
+                              "px-4 py-2 text-[length:var(--fs-body-sm)]",
+                              leafActive ? "text-[color:var(--accent)]" : "text-[color:var(--ink)]",
+                            )}
+                          >
+                            {leaf.label}
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </nav>
+          )}
+        </div>
+      </header>
+
+      <main className="mx-auto w-full max-w-[1600px] px-6 lg:px-10 py-6 lg:py-8">
+        <div className="stagger flex flex-col gap-6 lg:gap-8">{children}</div>
+      </main>
+
+      <footer className="mx-auto w-full max-w-[1600px] px-6 lg:px-10 py-6">
+        <div className="h-px w-full bg-[color:var(--rule)]" />
+        <div className="flex flex-wrap items-baseline justify-between gap-3 pt-3 text-[length:var(--fs-body-sm)] text-[color:var(--ink-mute)]">
+          <span className="font-serif italic">ReportFlow</span>
+          <span>
+            Do caixa à DRE, em um só lugar. <span className="tabular-nums">·</span> Brasil{" "}
+            <span className="tabular-nums">·</span> pt-BR
+          </span>
+        </div>
+      </footer>
+    </div>
+  );
+}

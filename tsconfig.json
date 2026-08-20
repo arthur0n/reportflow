@@ -1,0 +1,47 @@
+{
+  "include": [
+    "app/src/**/*",
+    "api/**/*",
+    "shared/**/*",
+    "drizzle/**/*",
+    "scripts/**/*",
+    "drizzle.config.ts",
+    "vitest.config.ts"
+  ],
+  "exclude": ["node_modules", "build", "dist", ".aws-sam"],
+  "compilerOptions": {
+    "incremental": true,
+    "tsBuildInfoFile": "./node_modules/typescript/tsbuildinfo",
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "lib": ["esnext", "dom", "dom.iterable"],
+    "jsx": "preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "useDefineForClassFields": true,
+
+    // Max strictness (conventions doc §5)
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noImplicitOverride": true,
+
+    "baseUrl": ".",
+    "types": ["node", "vite/client"],
+    "paths": {
+      "@/*": ["./app/src/*"],
+      "@api/*": ["./api/*"],
+      "@app/*": ["./app/src/*"],
+      "@shared/*": ["./shared/*"],
+      "@drizzle/*": ["./drizzle/*"]
+    }
+  }
+}

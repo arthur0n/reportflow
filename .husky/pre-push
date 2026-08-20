@@ -1,0 +1,2 @@
+bash scripts/check-migration-drift.sh
+pnpm validate
