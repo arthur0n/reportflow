@@ -22,12 +22,35 @@ export const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
 export const MODEL_EXTRACT = "gemini-3.5-flash";
 export const MODEL_ANALYSE = "gemini-3.5-flash-lite";
 
+/**
+ * §12.13 — the adversarial verify hop. Deliberately a DIFFERENT model than
+ * `MODEL_EXTRACT`: only a Google key exists today, so this cannot be
+ * cross-provider yet — it is the heavier "pro" tier rather than "flash", a
+ * different checkpoint and a different generation, which is the closest
+ * available proxy for "should not share its blind spots by construction"
+ * until a second provider key is configured. The registry above already
+ * supports cross-provider diversity (`getAdapter()` is a one-line-per-
+ * provider list); swapping this constant to `anthropic/claude-...` or similar
+ * the day a second key exists is the whole migration.
+ *
+ * There is no `gemini-3.5-pro` — checked live against `ListModels` before
+ * wiring this up; the "pro" tier skipped a 3.5 release. `gemini-3.1-pro-
+ * preview` is the nearest real pro-tier model to the 3.5-flash family used by
+ * `MODEL_EXTRACT`/`MODEL_ANALYSE`, so it is what is actually pinned here.
+ */
+export const MODEL_VERIFY = "gemini-3.1-pro-preview";
+
 /** cents of USD per 1M tokens — copied from smartstocke's COST_OF_GOODS. */
 const COST_OF_GOODS: Readonly<Record<string, { input: number; output: number }>> = {
   "gemini-3.5-flash": { input: 150, output: 900 },
   "gemini-3.5-flash-lite": { input: 30, output: 250 },
   "gemini-3.1-flash-lite": { input: 25, output: 150 },
   "gemini-2.5-flash": { input: 30, output: 250 },
+  // Not in the sibling project's table (that one never called a "pro" tier) —
+  // estimated from the same flash/flash-lite ratio (~2x flash) pending a real
+  // rate card entry. costUsd() still throws instead of billing zero (§7,
+  // §10.5), so an outright wrong price is loud, not a silent free ride.
+  "gemini-3.1-pro-preview": { input: 350, output: 1750 },
 };
 
 export function isPricedModel(model: string): boolean {

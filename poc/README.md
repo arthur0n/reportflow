@@ -20,16 +20,19 @@ it and cannot be broken by it.
 pnpm tsx poc/extract.ts     # hop 1 — PDFs -> validated JSON   (cached, idempotent)
 pnpm tsx poc/analyse.ts     # hop 2 — JSON -> pt-BR prose      (cached; --force to redo)
 pnpm tsx poc/render.ts      # deterministic substitution -> two HTML files
+pnpm tsx poc/verify.ts      # hop 3 — adversarial verify (§12.13) (cached, idempotent)
 ```
 
 Output (all gitignored — it is derived from real client data):
 
-| File                               | What                                                                     |
-| ---------------------------------- | ------------------------------------------------------------------------ |
-| `poc/out/relatorio-fiel.html`      | faithful copy of the reference layout, adapted to the Lisbon property    |
-| `poc/out/relatorio-melhorado.html` | improved variant — KPIs first, reconciliation, provenance, upcoming dues |
-| `poc/out/extractions/*.json`       | one validated extraction per source PDF                                  |
-| `poc/out/analysis.json`            | the `{{ai}}` slot texts                                                  |
+| File                               | What                                                                      |
+| ---------------------------------- | ------------------------------------------------------------------------- |
+| `poc/out/relatorio-fiel.html`      | faithful copy of the reference layout, adapted to the Lisbon property     |
+| `poc/out/relatorio-melhorado.html` | improved variant — KPIs first, reconciliation, provenance, upcoming dues  |
+| `poc/out/extractions/*.json`       | one validated extraction per source PDF                                   |
+| `poc/out/analysis.json`            | the `{{ai}}` slot texts                                                   |
+| `poc/out/verify/*.verdict.json`    | one adversarial verdict file per source PDF, plus `analysis.verdict.json` |
+| `poc/out/verify/SUMMARY.md`        | pt-BR roll-up: confirmed/refuted per doc, prose claims, exit status       |
 
 **To get the PDF:** open the HTML in Chrome → Print → Save as PDF → A4, and
 **untick "Headers and footers"**. That is §5.4: the print CSS is already
@@ -41,6 +44,9 @@ table headers repeating, no section split across a page break.
 not a speed trick — re-reading the same PDF must never bill twice (§7), which is
 exactly what a human does when a read looks wrong. Delete the JSON to force a
 re-read.
+
+`verify.ts` is cached the same way, one `poc/out/verify/<file>.verdict.json` per
+source; delete a verdict file to force a re-check of that one document.
 
 ---
 
@@ -63,7 +69,7 @@ template/
   declaration.ts   §3.2 — named roles + slot guidelines
   fiel.hbs         variant A
   melhorado.hbs    variant B
-extract.ts  analyse.ts  render.ts
+extract.ts  analyse.ts  render.ts  verify.ts
 ```
 
 ### The design decisions this POC actually exercises
@@ -93,6 +99,14 @@ extract.ts  analyse.ts  render.ts
   _before_ compilation, so a violation in an unreached branch still fails.
 - **§12.8 — recalibration invalidates.** The cache key is
   `<file>.rev<calibration_rev>.json`.
+- **§12.13 — adversarial verify, a different model, never rewrites.**
+  `verify.ts` hands the frozen field list to the SAME extraction template
+  (§3.1's "one source, many consumers" extended to this hop) so the verifier
+  knows which fields are mandated NORMALIZATIONS (dd/mm/yyyy dates, an IBAN
+  with spaces stripped, a wrapped PDF cell condensed to one string, a
+  paraphrase/short title) rather than treating every one of them as a
+  discrepancy. `valor_documento` / `fundamento` record what the verifier saw;
+  the extraction/analysis file is never touched.
 - **§5.4 — browser print.** `@page A4 / 18mm 15mm`, `.capa`, `.secao`,
   `thead table-header-group`, `.no-print`. Zero PDF dependencies.
 
@@ -118,9 +132,106 @@ Live, all 14 documents plus the analysis: **$0.25**.
 | Extract ×14 | `gemini-3.5-flash`      | 33 885 in / 22 152 out | $0.2502 |
 | Analyse ×1  | `gemini-3.5-flash-lite` | 6 613 in / 473 out     | $0.0032 |
 
-Model ids and rates are taken from `smartstocke/api/billing/cost-of-goods.ts`,
-not invented. `costUsd()` throws on an unpriced model — _unpriced is not free_.
-Re-running the scripts costs **$0** because both hops are cached.
+Model ids and rates for extract/analyse are taken from
+`smartstocke/api/billing/cost-of-goods.ts`, not invented. `costUsd()` throws on
+an unpriced model — _unpriced is not free_. Re-running the scripts costs **$0**
+because both hops are cached.
+
+---
+
+## Verify (§12.13)
+
+```bash
+pnpm tsx poc/verify.ts               # all 14 documents + the analysis
+pnpm tsx poc/verify.ts FT_C2025_141.pdf   # one document
+pnpm tsx poc/verify.ts --no-analysis      # extraction verify only
+pnpm tsx poc/verify.ts --no-extractions   # analysis verify only
+```
+
+Two adversarial checks, run by a model DIFFERENT from the one that produced
+the thing being checked:
+
+1. **Extraction verify** — the source PDF + the cached extraction JSON go to
+   the verifier with a refute-this prompt ("try to refute each field"). Each
+   field of each of the 13 faturas + 1 contrato gets a verdict: `confirmado` /
+   `refutado` / `ilegivel`.
+2. **Analysis verify** — the `{{ai}}` slot texts from `poc/out/analysis.json`
+   plus the raw extraction DATA (never a PDF — the same §12.3 guarantee hop 2
+   already gives, held a second time) go to the verifier, which decomposes
+   each slot into discrete factual claims and tries to refute each one.
+
+The verifier **never rewrites a value**. A `refutado` verdict is a flag for a
+human (`revisar`), not a correction — `valor_documento` / `fundamento` record
+what the verifier saw; the file being checked is never touched. Output:
+`poc/out/verify/<file>.verdict.json` per document, `analysis.verdict.json` for
+the prose, and a pt-BR roll-up at `poc/out/verify/SUMMARY.md`. `verify.ts`
+exits non-zero (and prints exactly which fields/claims) whenever anything
+comes back `refutado`. Cached the same way as `extract.ts` — an existing
+verdict file is skipped, not re-checked; delete it to force a re-check.
+
+**Model.** Only a Google key exists today, so this cannot be cross-provider
+yet — it is a different tier and generation instead: `gemini-3.1-pro-preview`,
+pinned in `lib/ai.ts` as `MODEL_VERIFY`. There is **no `gemini-3.5-pro`** —
+checked live against Gemini's `ListModels` before wiring this up; the "pro"
+tier skipped a 3.5 release entirely, so `gemini-3.1-pro-preview` is the
+nearest real pro-tier model to the 3.5-flash family `MODEL_EXTRACT` /
+`MODEL_ANALYSE` use. It is **not** in smartstocke's real
+`cost-of-goods.ts` (that table only ever priced the flash family) — rather
+than leave it unpriced (which would make `costUsd()` throw and block every
+call), `lib/ai.ts` adds an estimated rate (~2x flash, the same ratio flash/
+flash-lite already show), clearly commented as a placeholder pending a real
+rate-card entry. The registry (`getAdapter()`) already supports a second
+provider; swapping `MODEL_VERIFY` to it is the entire future migration.
+
+### Live result
+
+All 14 documents, first corrected pass: **$0.89** (54 022 in / 39 858 out
+tokens across 15 calls — 14 extraction verifies + 1 analysis verify).
+
+| Check                     | Fields/claims checked | Confirmado | Refutado | Ilegível |
+| ------------------------- | --------------------- | ---------- | -------- | -------- |
+| Extraction ×14 (all docs) | 312                   | **312**    | **0**    | 0        |
+| Analysis (2 slots)        | 20                    | 15         | 4        | 1        |
+
+**Extraction verify: 312/312 fields confirmed, zero refutations**, across all
+13 faturas and the contract. The first live attempt was not this clean — see
+"a false-positive lesson" below.
+
+**Analysis verify: 4 of 20 decomposed claims came back `refutado`, 1
+`ilegivel`.** All 5 share one root cause, not five different problems: they
+reference the deterministic context `report-model.ts`'s `buildContext()`
+computes (the label "cláusula Quarta", the semiannual due-date schedule
+derived from the contract's periodicity) — `analyse.ts` is given that computed
+context and writes prose from it, but per §12.13 the verifier is given only
+the raw extraction JSON, which does not contain those derived facts. The
+verifier is correctly saying "I cannot confirm this from what I was handed" —
+that is not the same as "this is wrong." Cross-checked by hand against
+`report-model.ts`: every one of the 5 flagged claims is accurate. `verify.ts`
+still exits non-zero and still lists them for `revisar`, because a human
+should make that call, not this script — but it is worth knowing, before
+reading the `revisar` list as a defect count, that this batch is a scope
+artifact of "extraction data only," not a caught error.
+
+### A false-positive lesson from the first live attempt
+
+The first attempt at this prompt refuted **7 of 13 faturas** (always
+`itens[0].descricao`) and produced an **invalid, truncated** response for the
+contract. Both were the same mistake: the verifier was never told that
+`fields/fatura.ts` explicitly asks for a wrapped, multi-line PDF cell
+"condensed... numa só string" and that `fields/contrato.ts`'s
+`obrigacoes_principais.titulo/detalhe` are explicitly a "rótulo curto" and a
+paraphrase, not a verbatim quote. Compared against the raw document text
+literally, every one of those MANDATED transformations reads as a
+discrepancy — the fatura refutations were pure PDF-line-wrap whitespace, and
+the contract's were paraphrase fields compared against a full clause quote
+(worsened by a `maxTokens: 8192` cap that then truncated the contract's long
+response into invalid JSON). The fix — handing the verifier the same frozen
+field list `fields/spec.ts`'s `fieldsToPrompt()` gives the extractor, plus
+explicit normalization/whitespace guidance, plus a `32768`/`16384` token
+budget — is what produced the clean 312/312 rerun above. Kept here rather than
+silently corrected because it is the whole point of §12.13's own caution: a
+verifier that does not understand the contract it is checking against
+produces confident-sounding noise, not signal.
 
 ---
 
@@ -173,20 +284,21 @@ is most likely to miss, and they are exactly what a report is for.
 
 ## Maps to which future issue
 
-| POC file                  | Future home                                             | Issue shape                                                                |
-| ------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `fields/spec.ts`          | `api/lib/extract/field-schema.ts`                       | Calibrate: build Zod + prompt + provider schema from `extract_fields` rows |
-| `fields/*.ts`             | `extract_templates` / `extract_fields` rows             | Calibrate UI: AI proposes → human edits → freeze                           |
-| `lib/providers/*`         | `relay/src/providers/*`                                 | Relay adapter + `CHANNELS` registry line + SSM param                       |
-| `lib/ai.ts` (`costUsd`)   | `api/billing/cost-of-goods.ts`                          | Port from smartstocke; add rows before billing (§10.5)                     |
-| `lib/money.ts`            | `shared/money.ts`                                       | Used by both the renderer and the review screen                            |
-| `lib/handlebars.ts`       | `api/lib/render/handlebars.ts`                          | §12.4 hardening + sandboxed authoring `<iframe>`                           |
-| `lib/report-model.ts`     | `api/lib/render/context.ts`                             | The deterministic half; the only place numbers are derived                 |
-| `template/declaration.ts` | `outbound_template_versions.inputs_json` / `slots_json` | Role gating → _"aguardando: contrato"_ state                               |
-| `template/*.hbs`          | `outbound_template_versions.html`                       | System templates authored by platform admin (`lov` scope)                  |
-| `extract.ts`              | hop 1 job + collector                                   | S3 outbox, `unique(s3_key, calibration_rev)`, `revisar` on invalid         |
-| `analyse.ts`              | hop 2 job                                               | Per-slot `edited` flag, regeneration skips edited slots (§5.2)             |
-| `render.ts`               | draft render + publish                                  | Freeze HTML to S3 on publish (§5.1)                                        |
+| POC file                  | Future home                                             | Issue shape                                                                         |
+| ------------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `fields/spec.ts`          | `api/lib/extract/field-schema.ts`                       | Calibrate: build Zod + prompt + provider schema from `extract_fields` rows          |
+| `fields/*.ts`             | `extract_templates` / `extract_fields` rows             | Calibrate UI: AI proposes → human edits → freeze                                    |
+| `lib/providers/*`         | `relay/src/providers/*`                                 | Relay adapter + `CHANNELS` registry line + SSM param                                |
+| `lib/ai.ts` (`costUsd`)   | `api/billing/cost-of-goods.ts`                          | Port from smartstocke; add rows before billing (§10.5)                              |
+| `lib/money.ts`            | `shared/money.ts`                                       | Used by both the renderer and the review screen                                     |
+| `lib/handlebars.ts`       | `api/lib/render/handlebars.ts`                          | §12.4 hardening + sandboxed authoring `<iframe>`                                    |
+| `lib/report-model.ts`     | `api/lib/render/context.ts`                             | The deterministic half; the only place numbers are derived                          |
+| `template/declaration.ts` | `outbound_template_versions.inputs_json` / `slots_json` | Role gating → _"aguardando: contrato"_ state                                        |
+| `template/*.hbs`          | `outbound_template_versions.html`                       | System templates authored by platform admin (`lov` scope)                           |
+| `extract.ts`              | hop 1 job + collector                                   | S3 outbox, `unique(s3_key, calibration_rev)`, `revisar` on invalid                  |
+| `analyse.ts`              | hop 2 job                                               | Per-slot `edited` flag, regeneration skips edited slots (§5.2)                      |
+| `render.ts`               | draft render + publish                                  | Freeze HTML to S3 on publish (§5.1)                                                 |
+| `verify.ts`               | hop 3 job (§12.13)                                      | `report_verify:{provider}:{model}:{refKey}` charge key, `revisar` on any `refutado` |
 
 ### Not covered by this POC
 
@@ -194,5 +306,11 @@ is most likely to miss, and they are exactly what a report is for.
 - S3, the relay, the collector, the job state machine (§12.1).
 - Page-1 text extraction for tier-1 detection (§12.2) — `detectType()` uses the
   filename; the library spike is still open.
+- A second provider key for the verify hop — `MODEL_VERIFY` is same-family,
+  different-tier (`gemini-3.1-pro-preview`) rather than cross-provider (§12.13).
+- Persisting `report-model.ts`'s computed context (`ctx.verificacoes`,
+  `ctx.vencimentos`) alongside `analysis.json` — right now it only exists
+  ephemerally inside `analyse.ts`'s run, so `verify.ts`'s analysis check (raw
+  extraction data only, per spec) cannot confirm prose claims that cite it.
 - `ai_charges` rows / idempotency keys — cost is computed and printed, not billed.
 - Template authoring UI, versioning, per-slot editing UI.

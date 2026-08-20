@@ -35,6 +35,10 @@ function toGeminiSchema(node: Record<string, unknown>): Record<string, unknown> 
   const out: Record<string, unknown> = { type };
   if (typeof node["description"] === "string") out["description"] = node["description"];
   if (nullable) out["nullable"] = true;
+  // §12.13 — the verify hop's output schema constrains `verdict` to a closed
+  // set (confirmado/refutado/ilegivel). Gemini's OpenAPI-subset dialect
+  // accepts `enum` on a string property; nothing before this needed it.
+  if (Array.isArray(node["enum"])) out["enum"] = node["enum"];
 
   if (type === "object") {
     const props = (node["properties"] ?? {}) as Record<string, Record<string, unknown>>;
