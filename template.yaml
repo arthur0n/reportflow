@@ -82,20 +82,51 @@ Resources:
           # Documents bucket (decisions §8, §12.5). One bucket, not per-env —
           # see api/lib/storage.ts's own default.
           DOCS_BUCKET: reportflow-docs-prod
-      # Literal bucket ARN string, NOT !Ref/!GetAtt: the bucket is not a
+      # Literal bucket ARN strings, NOT !Ref/!GetAtt: the bucket is not a
       # resource in this template (created out of band, per the onboarding
       # checklist), and aws_infrastructure.md:496 flags the same SAM
       # circular-dependency trap for a bucket ARN referenced from this
       # function's own role.
+      #
+      # SPLIT BY PREFIX rather than one grant on `/*`. The relay writes results
+      # and the API reads them, and that direction is only real if the API
+      # CANNOT write there — a blanket `/*` PutObject would let the API forge
+      # the very answer it later trusts, and would also let it write a claim
+      # and wedge a job the relay was about to take. Note there is deliberately
+      # NO PutObject on `results/*` or `claims/*` anywhere below: the split is
+      # held by ABSENCE of a grant, which nothing can be added later to
+      # accidentally re-open, rather than by an explicit Deny that a future
+      # broader Allow would have to be checked against.
+      #
+      # There is no `s3:HeadObject` IAM action — HeadObject is authorized by
+      # s3:GetObject, which is what `headDocument` in api/lib/storage.ts
+      # actually needs.
       Policies:
         - Statement:
-            - Sid: DocsBucketReadWrite
+            # Tenant documents. `org_*` is the whole document namespace: keys
+            # are minted server-side as `{orgId}/{uuid}.pdf`
+            # (api/lib/storage.ts) and orgId is always Clerk's `org_`-prefixed
+            # org id (api/trpc/context.ts), so this covers every upload while
+            # excluding the three relay prefixes by construction. PutObject is
+            # required because a presigned POST is signed with THIS role's
+            # credentials — S3 authorizes the browser's upload against it.
+            - Sid: TenantDocumentsReadWrite
               Effect: Allow
               Action:
                 - s3:PutObject
                 - s3:GetObject
-                - s3:HeadObject
-              Resource: "arn:aws:s3:::reportflow-docs-prod/*"
+              Resource: "arn:aws:s3:::reportflow-docs-prod/org_*"
+            # The API is the SOLE writer under jobs/ (decisions §12.11). Write
+            # only: it never reads back a job it enqueued.
+            - Sid: EnqueueRelayJob
+              Effect: Allow
+              Action: s3:PutObject
+              Resource: "arn:aws:s3:::reportflow-docs-prod/jobs/*"
+            # The poll backstop (§4.1) and local dev read results. Read only.
+            - Sid: ReadRelayResult
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: "arn:aws:s3:::reportflow-docs-prod/results/*"
       Events:
         ApiEvent:
           Type: HttpApi

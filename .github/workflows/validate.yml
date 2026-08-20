@@ -23,3 +23,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - run: pnpm validate
+
+      # `relay/` is its own package with its own lockfile and node_modules (it
+      # bundles separately for a non-VPC Lambda and shares no dependency tree
+      # with the API). Root `pnpm validate` deliberately does not reach into
+      # it, so CI runs the second half explicitly.
+      - run: pnpm -C relay install --frozen-lockfile
+
+      - run: pnpm -C relay validate

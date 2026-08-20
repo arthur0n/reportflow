@@ -43,7 +43,11 @@ export const REQUIRED_CONTENT_TYPE = "application/pdf";
 
 const s3 = new S3Client({ region: REGION });
 
-function docsBucket(): string {
+/** Exported so api/lib/relay.ts names the same bucket by the same rule. The
+ * outbox prefixes (`jobs/`, `results/`) live in this bucket too — a second
+ * bucket would buy a second grant and nothing else, since the relay must read
+ * the documents anyway. Two copies of this default would drift. */
+export function docsBucket(): string {
   const bucket = process.env["DOCS_BUCKET"];
   return bucket !== undefined && bucket.length > 0 ? bucket : "reportflow-docs-prod";
 }

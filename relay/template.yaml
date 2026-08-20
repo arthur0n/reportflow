@@ -1,0 +1,196 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: ReportFlow outbound relay (non-VPC) - S3-triggered channel-routed sender; the `ai` channel owns the provider adapter registry
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Copied from mrhewbuc-relay-template/, then adapted per docs/relay_lambda.md
+# and decisions.md §6/§7/§12.
+#
+# Its own stack (`reportflow-relay`), separate from `reportflow-api-prod`:
+# this function is deliberately NOT in a VPC — that is the whole reason it
+# exists — and keeping the two apart means a relay deploy cannot disturb the
+# API's ENIs, which are the slow half of every SAM update.
+#
+# ── ONE MANUAL STEP AFTER THE FIRST DEPLOY ──────────────────────────────────
+# The docs bucket (`reportflow-docs-prod`) is created OUT OF BAND, so it is not
+# a resource here and SAM's `Type: S3` event (which requires `Bucket: !Ref`)
+# cannot be used. The invoke permission below is in the template; the bucket
+# NOTIFICATION is not, and must be applied once:
+#
+#   aws s3api put-bucket-notification-configuration \
+#     --bucket reportflow-docs-prod \
+#     --region sa-east-1 \
+#     --notification-configuration '{
+#       "LambdaFunctionConfigurations": [{
+#         "Id": "reportflow-relay-jobs",
+#         "LambdaFunctionArn": "<RelayFunctionArn from Outputs>",
+#         "Events": ["s3:ObjectCreated:*"],
+#         "Filter": {"Key": {"FilterRules": [{"Name": "prefix", "Value": "jobs/"}]}}
+#       }]
+#     }'
+#
+# NOTE: put-bucket-notification-configuration REPLACES the whole configuration.
+# When the collector (§4.1) is added on the `results/` prefix, both entries go
+# in one call or the first one is deleted.
+#
+# The `jobs/` prefix filter is not an optimisation — §12.11 says the relay
+# processes only that prefix. Without the filter, every uploaded PDF and every
+# result the relay itself writes would invoke it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, prod]
+
+Globals:
+  Function:
+    # A 10-page extraction with a reasoning model runs tens of seconds (§6.2),
+    # and there is no partial credit: a timeout is a paid call with no result.
+    Timeout: 300
+    # Big enough to hold a 25 MB PDF as bytes plus its base64 form (§12.5 caps
+    # the upload), and CPU on Lambda scales with memory, which is what the
+    # base64 encode actually wants.
+    MemorySize: 1024
+    Runtime: nodejs24.x
+    Architectures: [arm64]
+    Tracing: PassThrough
+    Tags:
+      Project: reportflow
+      Environment: !Ref Environment
+      CostCenter: billable
+
+Resources:
+  RelayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/reportflow-relay-${Environment}"
+      RetentionInDays: 7
+
+  RelayFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: RelayLogGroup
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        EntryPoints:
+          - src/relay-handler.ts
+        Minify: true
+        Target: es2022
+        Sourcemap: true
+    Properties:
+      FunctionName: !Sub "reportflow-relay-${Environment}"
+      CodeUri: .
+      Handler: src/relay-handler.handler
+      Description: ReportFlow outbound relay - `ai` channel over the provider adapter registry
+      # NO VpcConfig. This function must reach provider APIs on the public
+      # internet; the API Lambda is the one that must reach RDS. Neither can be
+      # both without a NAT Gateway, which is the split this file exists for.
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          # Platform provider keys: `${SSM_PREFIX}/{provider}-api-key`.
+          # BYOK keys are NOT here — they are per-tenant and dynamic, resolved
+          # at runtime under /reportflow/tenants/ (§7, §12.7, src/secrets.ts).
+          SSM_PREFIX: !Sub "/reportflow/relay/${Environment}"
+          # One bucket, not one per environment - matches api/lib/storage.ts.
+          # It holds the tenants' PDFs AND the jobs/ + results/ prefixes, which
+          # is why there is only one S3 grant below.
+          DOCS_BUCKET: reportflow-docs-prod
+      # Retries here are the LAST line of defence, not the pipeline's retry
+      # mechanism. A classified failure is written as a result and the collector
+      # enqueues attempt n+1 under a new jobId (§12.1); these two attempts only
+      # cover the case where no result could be written at all.
+      EventInvokeConfig:
+        MaximumRetryAttempts: 2
+        MaximumEventAgeInSeconds: 3600
+      Policies:
+        - Statement:
+            # Per-project secret isolation: the relay may read only its own
+            # subtree, so a new provider is a new parameter under this prefix
+            # and no IAM edit.
+            - Sid: RelayReadPlatformKeys
+              Effect: Allow
+              Action: [ssm:GetParameter, ssm:GetParameters]
+              Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/reportflow/relay/${Environment}/*"
+            # BYOK (§7). The wildcard is unavoidable — the relay cannot know in
+            # advance which tenant it will serve — and §12.7 is explicit that IT
+            # IS NOT THE GUARD. The guard is in src/secrets.ts: the allowed path
+            # is derived from the tenantId in the job KEY and compared for
+            # EQUALITY, so this grant is only ever exercised on the one
+            # parameter that job was entitled to.
+            - Sid: RelayReadTenantKeys
+              Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/reportflow/tenants/*"
+            # Resource "*" is required because the SSM default key is resolved
+            # by alias, not by ARN. ViaService is what constrains it: this grant
+            # can only decrypt THROUGH SSM, never against another key user.
+            - Sid: RelaySsmKmsDecrypt
+              Effect: Allow
+              Action: kms:Decrypt
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub "ssm.${AWS::Region}.amazonaws.com"
+            # LITERAL bucket ARNs, never !Ref/!GetAtt: the bucket is not a
+            # resource in this template (created out of band per the onboarding
+            # checklist), and aws_infrastructure.md flags the SAM
+            # circular-dependency trap for a bucket ARN referenced from the
+            # function's own role. The root template.yaml says the same thing
+            # about the same bucket.
+            - Sid: RelayConsumeJob
+              Effect: Allow
+              Action: [s3:GetObject, s3:DeleteObject]
+              Resource: "arn:aws:s3:::reportflow-docs-prod/jobs/*"
+            # GetObject is here for the duplicate-delivery check (HeadObject is
+            # authorized by s3:GetObject), not to consume results. The direction
+            # split that matters is the WRITE side: the relay cannot PutObject
+            # under jobs/, so it cannot enqueue work for itself.
+            - Sid: RelayWriteResult
+              Effect: Allow
+              Action: [s3:PutObject, s3:GetObject]
+              Resource: "arn:aws:s3:::reportflow-docs-prod/results/*"
+            # The claim decides which of two concurrent deliveries calls the
+            # provider — a conditional PutObject, so exactly one wins. The API
+            # has NO grant here: a claim is the relay's own bookkeeping, and it
+            # must not be possible to pre-claim a job at enqueue time. The
+            # lifecycle rule expires a leaked one alongside the jobs and
+            # results. Writes here cannot re-trigger this function: the bucket
+            # notification filters on the `jobs/` prefix.
+            - Sid: RelayClaimJob
+              Effect: Allow
+              Action: [s3:PutObject, s3:DeleteObject]
+              Resource: "arn:aws:s3:::reportflow-docs-prod/claims/*"
+            # READ ONLY, and read across every tenant's prefix, because the
+            # relay cannot know in advance whose PDF a job will name. The only
+            # thing between this grant and a cross-tenant read is that the
+            # tenantId in the job KEY and the s3Key in the job PAYLOAD must
+            # agree - enforced by assertOwnedKey in src/job.ts. There is no
+            # PutObject here: the relay never writes a tenant's document.
+            # Tenant documents only (org_* = Clerk orgId prefix, minted
+            # server-side). jobs/ and results/ have their own Sids; a bucket-wide
+            # read would quietly re-merge the prefixes IAM is here to separate.
+            - Sid: RelayReadTenantDocuments
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: "arn:aws:s3:::reportflow-docs-prod/org_*"
+
+  # Lets S3 invoke the function. The SourceAccount condition is what stops
+  # another account's bucket from pointing its notifications at this ARN.
+  RelayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt RelayFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: "arn:aws:s3:::reportflow-docs-prod"
+
+Outputs:
+  RelayFunctionArn:
+    Description: Relay function ARN - use this in the put-bucket-notification-configuration call above
+    Value: !GetAtt RelayFunction.Arn
+    Export:
+      Name: !Sub "reportflow-RelayFunctionArn-${Environment}"

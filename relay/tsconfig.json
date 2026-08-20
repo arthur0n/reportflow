@@ -1,0 +1,31 @@
+{
+  "include": ["src/**/*", "vitest.config.ts", "eslint.config.js"],
+  "exclude": ["node_modules", ".aws-sam"],
+  "compilerOptions": {
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "lib": ["esnext"],
+    "moduleResolution": "bundler",
+    "allowJs": true,
+    "checkJs": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+
+    // Mirrors the root tsconfig's strictness block verbatim (conventions §5).
+    // The relay ships as its own bundle, so it needs its own compiler settings;
+    // letting them drift downward would make this the one lax corner of the
+    // repo, and it is the corner that holds the API keys.
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noImplicitOverride": true,
+
+    "types": ["node"]
+  }
+}

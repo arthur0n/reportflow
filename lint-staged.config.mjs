@@ -8,7 +8,10 @@
 
 const ESLINT_IGNORED_SEGMENT = "/app/src/components/ui/";
 const ESLINT_IGNORED_FILES = ["/vite.config.ts"];
-const ESLINT_IGNORED_DIRS = ["/poc/"];
+// `relay/` has its own eslint.config.js and its own tsconfig; the root
+// eslint ignores it, so handing it a staged relay file would produce a
+// "file ignored by config" warning and fail --max-warnings 0.
+const ESLINT_IGNORED_DIRS = ["/poc/", "/relay/"];
 
 function shouldLint(file) {
   return (

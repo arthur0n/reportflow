@@ -81,7 +81,21 @@ const sharedRules = {
 
 export default [
   {
-    ignores: ["dist/", "node_modules/", ".aws-sam/", "drizzle/meta/", "app/src/components/ui/**", "vite.config.ts", "poc/**"],
+    // `relay/**` is its own package with its own tsconfig and its own
+    // eslint.config.js carrying the SAME rules (see relay/eslint.config.js).
+    // It cannot be linted from here: `projectService` resolves against the
+    // root program, which does not include relay/, so every relay file would
+    // fail to parse. Lint it with `pnpm -C relay lint`.
+    ignores: [
+      "dist/",
+      "node_modules/",
+      ".aws-sam/",
+      "drizzle/meta/",
+      "app/src/components/ui/**",
+      "vite.config.ts",
+      "poc/**",
+      "relay/**",
+    ],
   },
   js.configs.recommended,
   // TypeScript files (.ts) — strict function limits
