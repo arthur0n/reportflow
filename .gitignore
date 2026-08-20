@@ -1,0 +1,12 @@
+# private — internal infra identifiers + client data, never public
+docs/design/
+pdf/
+**/__fixtures__/real-*
+
+node_modules/
+dist/
+.aws-sam/
+.env
+.env.*
+*.log
+.DS_Store
