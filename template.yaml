@@ -135,9 +135,165 @@ Resources:
             Path: /{proxy+}
             Method: ANY
 
+  ReportFlowCollectorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/reportflow-collector-${Environment}"
+      RetentionInDays: 7
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # THE COLLECTOR (decisions §4.1) — the third Lambda.
+  #
+  # The relay cannot reach RDS (non-VPC) and the API cannot reach the internet
+  # (VPC, no NAT). Something VPC-bound has to move a finished result into
+  # Postgres, and this is it. It needs NO internet: S3 is reached through the
+  # free gateway endpoint the API already uses, and S3 → Lambda is a PUSH from
+  # the S3 service rather than an outbound dial. No NAT, no new VPC endpoint,
+  # $0/month.
+  #
+  # IT LIVES HERE, NOT IN relay/template.yaml. It is the API's twin: same VPC,
+  # same subnets and security group, same DB_* environment, same `api/db` and
+  # drizzle code in the bundle. The relay's stack is deliberately VPC-LESS —
+  # that is the entire reason it is a separate stack — so adding a VPC-bound
+  # function to it would re-introduce the ENI churn the split buys us.
+  #
+  # ── THE MANUAL STEP, AND WHY IT MUST BE ONE CALL ───────────────────────────
+  # `reportflow-docs-prod` is created out of band, so it is not a resource in
+  # any template and SAM's `Type: S3` event (which requires `Bucket: !Ref`)
+  # cannot be used. The invoke permission below IS in the template; the bucket
+  # NOTIFICATION is not.
+  #
+  # `put-bucket-notification-configuration` REPLACES the whole configuration.
+  # The relay's `jobs/` trigger and this function's `results/` trigger must
+  # therefore go in a SINGLE call — applying either one alone silently deletes
+  # the other, and the symptom is a pipeline that stops halfway with no error
+  # anywhere:
+  #
+  #   aws s3api put-bucket-notification-configuration \
+  #     --bucket reportflow-docs-prod \
+  #     --region sa-east-1 \
+  #     --notification-configuration '{
+  #       "LambdaFunctionConfigurations": [
+  #         {
+  #           "Id": "reportflow-relay-jobs",
+  #           "LambdaFunctionArn": "<RelayFunctionArn, relay stack Outputs>",
+  #           "Events": ["s3:ObjectCreated:*"],
+  #           "Filter": {"Key": {"FilterRules": [{"Name": "prefix", "Value": "jobs/"}]}}
+  #         },
+  #         {
+  #           "Id": "reportflow-collector-results",
+  #           "LambdaFunctionArn": "<CollectorFunctionArn, this stack Outputs>",
+  #           "Events": ["s3:ObjectCreated:*"],
+  #           "Filter": {"Key": {"FilterRules": [{"Name": "prefix", "Value": "results/"}]}}
+  #         }
+  #       ]
+  #     }'
+  #
+  # The `results/` prefix filter is not an optimisation: without it every
+  # uploaded PDF, every job the API enqueues and every claim the relay takes
+  # would invoke this function.
+  # ───────────────────────────────────────────────────────────────────────────
+  ReportFlowCollectorFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: ReportFlowCollectorLogGroup
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        EntryPoints:
+          - api/collector/handler.ts
+        Minify: true
+        Target: es2022
+        Sourcemap: true
+        External:
+          - pg-native
+          - better-sqlite3
+          - tedious
+          - sqlite3
+          - mysql
+          - mysql2
+          - pg-query-stream
+          - oracledb
+    Properties:
+      FunctionName: !Sub reportflow-collector-${Environment}
+      CodeUri: .
+      Handler: api/collector/handler.handler
+      Description: ReportFlow collector - moves relay results into RDS (decisions §4.1, §12.1)
+      Tracing: PassThrough
+      # One result is one S3 read plus a handful of statements; the 30s Globals
+      # default is already generous. Left explicit because a VPC cold start
+      # eats into it and a timeout here means a paid result nobody collected.
+      Timeout: 60
+      # Copied from ReportFlowApiFunction — same RDS, same shared VPC.
+      VpcConfig:
+        SecurityGroupIds:
+          - sg-0d065bb06c8c04a68
+        SubnetIds:
+          - subnet-0cc43286651b1e2d9
+          - subnet-03602b4d349546b6b
+          - subnet-0ffadc50f6a7a1f26
+      Environment:
+        Variables:
+          # The DB half of the API's environment, and only that half. No
+          # CLERK_* here: the collector runs on an S3 event, never inside a
+          # user request, and derives its tenant from the object KEY
+          # (api/collector/collect.ts explains why that provenance is safe).
+          # A Clerk key it cannot use is a key that can only leak.
+          DB_HOST: !Sub "{{resolve:ssm:/reportflow/api/${Environment}/db-host}}"
+          DB_NAME: !Sub "{{resolve:ssm:/reportflow/api/${Environment}/db-name}}"
+          DB_USER: !Sub "{{resolve:ssm:/reportflow/api/${Environment}/db-user}}"
+          DB_PASSWORD: !Sub "{{resolve:ssm:/reportflow/api/${Environment}/db-password}}"
+          ENVIRONMENT: !Ref Environment
+          DOCS_BUCKET: reportflow-docs-prod
+      # A throw is the retry (api/collector/handler.ts). Safe because
+      # collectResult is idempotent: a redelivery after a partial write finds
+      # the row already settled and skips it.
+      EventInvokeConfig:
+        MaximumRetryAttempts: 2
+        MaximumEventAgeInSeconds: 3600
+      # Literal bucket ARNs, same reason as the API function above: the bucket
+      # is not a resource in this template, and a !Ref would create the SAM
+      # circular dependency aws_infrastructure.md:496 warns about.
+      Policies:
+        - Statement:
+            # Read the result it was notified about. Read only — the collector
+            # must never be able to write the answer it then trusts, exactly
+            # as the API cannot (see ReadRelayResult above).
+            - Sid: CollectorReadRelayResult
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: "arn:aws:s3:::reportflow-docs-prod/results/*"
+            # §4.2's auto-retry. The collector is the second writer under
+            # `jobs/` — §12.11 says that prefix is written "solely by the API",
+            # and this is the one sanctioned extension of that: the retry is a
+            # NEW JOB with the attempt bumped in the jobId (§12.1), and the
+            # decision to make it belongs where the pipeline state lives, which
+            # is the database, which only this function and the API can reach.
+            # Write only: it never reads a job back.
+            - Sid: CollectorEnqueueRetry
+              Effect: Allow
+              Action: s3:PutObject
+              Resource: "arn:aws:s3:::reportflow-docs-prod/jobs/*"
+      # NO Events: here. The S3 trigger is applied out of band (see above).
+
+  # Lets S3 invoke the collector. SourceAccount is what stops another account's
+  # bucket from pointing its notifications at this ARN.
+  ReportFlowCollectorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ReportFlowCollectorFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: "arn:aws:s3:::reportflow-docs-prod"
+
 Outputs:
   ApiGatewayUrl:
     Description: API Gateway endpoint (use this as VITE_API_URL)
     Value: !Sub "https://${ReportFlowHttpApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
   FunctionArn:
     Value: !GetAtt ReportFlowApiFunction.Arn
+  CollectorFunctionArn:
+    Description: Collector function ARN - use this in the put-bucket-notification-configuration call above, in the SAME call as the relay's jobs/ trigger
+    Value: !GetAtt ReportFlowCollectorFunction.Arn
+    Export:
+      Name: !Sub "reportflow-CollectorFunctionArn-${Environment}"

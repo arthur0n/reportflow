@@ -286,10 +286,35 @@ export const reportJobs = pgTable(
     tenantId: varchar("tenant_id", { length: TENANT_ID_LENGTH }).notNull(),
     kind: varchar({ length: 20 }).notNull(),
     status: varchar({ length: 20 }).notNull().default("pending"),
-    // The outbox job / result object key, attempt number included.
+    // The OUTBOX JOB key for the attempt currently in flight —
+    // `jobs/{tenantId}/{jobId}.json` (api/lib/relay.ts). The result key is
+    // DERIVED from it, never stored: two columns holding the same two facts
+    // are two columns that can disagree.
     s3Key: text("s3_key").notNull(),
+    // The attempt currently in flight, 1-based, and always equal to the `-a{n}`
+    // suffix of the jobId inside `s3_key` (api/lib/relay.ts `mintJobId`). This
+    // is what makes §12.1's stale-attempt rejection possible: a result whose
+    // key carries a LOWER attempt than this column is the answer to work that
+    // has already been superseded, and the collector drops it without opening
+    // the file. A retry UPDATES this row (new `s3_key`, attempt + 1) rather
+    // than inserting a second one — the UI polls one row for the life of the
+    // work, and `unique(s3_key)` still holds because the key carries the
+    // attempt. 0 is the pre-enqueue default, never an in-flight value.
     attempt: integer().notNull().default(0),
     error: text(),
+    // The canonical job payload (§6) as enqueued, kept so the COLLECTOR can
+    // re-enqueue attempt n+1 without being able to compose one. It cannot
+    // compose one: the relay DELETES `jobs/{…}.json` once it has written a
+    // result, and rebuilding the prompt would mean the collector owning the
+    // field list, the template and the model choice — i.e. not being thin.
+    // §4.2's "auto-retry once" is only implementable with this column.
+    request: jsonb(),
+    // The relay result verbatim (`{content,usage,model,provider}` or
+    // `{error:{type,message}}`), written by whichever of the two writers —
+    // collector or poll backstop — wins the transition. Raw on purpose: what
+    // the model actually said is the evidence for every downstream decision,
+    // and a parsed-and-discarded copy cannot be re-read after a bug.
+    result: jsonb(),
     // Optional back-references — a detect/extract job predates any report.
     documentId: uuid("document_id").references(() => documents.id),
     // No action, not cascade: report_jobs is the append-only job/status

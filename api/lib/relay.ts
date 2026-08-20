@@ -103,6 +103,53 @@ export function resultKeyFor(tenantId: string, jobId: string): string {
   return `results/${tenantId}/${jobId}.json`;
 }
 
+/** The relay's own segment rule (relay/src/keys.ts), restated here because the
+ * two bundles cannot import each other. api/lib/relay.test.ts pins that they
+ * still agree. */
+const SEGMENT = /^[A-Za-z0-9_-]{1,128}$/u;
+
+export type OutboxPrefix = "jobs" | "results";
+
+export interface OutboxKeyParts {
+  readonly prefix: OutboxPrefix;
+  readonly tenantId: string;
+  readonly jobId: string;
+}
+
+/**
+ * The INVERSE of `jobKeyFor` / `resultKeyFor`, and the collector's entry point:
+ * an S3 `ObjectCreated` event hands it a key and nothing else.
+ *
+ * Parses the WHOLE shape and refuses anything that is not exactly three
+ * segments under a known prefix — the same rule, and the same reason, as
+ * `parseJobKey` in relay/src/keys.ts: a `tenantId` taken from a key that was
+ * never proven to be a key is a path expression, and every tenant check
+ * downstream of it is then checking a value the caller chose.
+ *
+ * Returns null rather than throwing. Both callers are deciding whether a key is
+ * theirs — the collector sees every notification the bucket sends it, and the
+ * poll backstop reads a column — so "not ours" must be answerable without
+ * making it look like a fault.
+ */
+export function parseOutboxKey(key: string): OutboxKeyParts | null {
+  const parts = key.split("/");
+  if (parts.length !== 3) {
+    return null;
+  }
+  const [prefix, tenantId = "", file = ""] = parts;
+  if (prefix !== "jobs" && prefix !== "results") {
+    return null;
+  }
+  if (!SEGMENT.test(tenantId) || !file.endsWith(".json")) {
+    return null;
+  }
+  const jobId = file.slice(0, -".json".length);
+  if (!SEGMENT.test(jobId)) {
+    return null;
+  }
+  return { prefix, tenantId, jobId };
+}
+
 /**
  * Drops the job in the outbox. Fire and forget: the S3 PutObject succeeding is
  * the whole handoff, and nothing here waits for the relay.
@@ -129,7 +176,35 @@ export async function enqueueRelayJob(
   );
 }
 
-export type RelayJobStatus = { status: "pending" } | { status: "ready"; result: unknown };
+/**
+ * The largest result body this API will read. 10 MiB is two orders of magnitude
+ * above a real result — §6.2 budgets a few thousand output tokens — so anything
+ * over it is a bug or a foreign object, and reading it would cost the Lambda's
+ * memory to learn nothing.
+ */
+export const MAX_RESULT_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Three outcomes, not two.
+ *
+ * `malformed` exists because the alternative was a THROW, and a throw here does
+ * not settle anything: neither ingress path reaches a compare-and-set, so the
+ * row stays `pending` forever while the poll errors on every refetch. A body we
+ * cannot read is a FACT about the job, and the state machine has a place to put
+ * facts about a job. It is the caller's business what it means (see
+ * api/collector/collect.ts) — this function's business is to answer without
+ * exploding.
+ */
+export type RelayJobStatus =
+  | { status: "pending" }
+  | { status: "ready"; result: unknown }
+  | { status: "malformed"; reason: string };
+
+/** Bounded so a stream error or a parser's echo of the input cannot become the
+ * `report_jobs.error` column. Same rule the relay applies to its own errors. */
+function describe(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err)).slice(0, 200);
+}
 
 /**
  * Reads the result, or reports that it is not there yet.
@@ -144,22 +219,46 @@ export type RelayJobStatus = { status: "pending" } | { status: "ready"; result: 
  * a permanent "pending". The bucket's lifecycle rule collects them instead.
  */
 export async function getRelayJob(tenantId: string, jobId: string): Promise<RelayJobStatus> {
+  let out;
   try {
-    const out = await s3.send(
-      new GetObjectCommand({
-        Bucket: docsBucket(),
-        Key: resultKeyFor(tenantId, jobId),
-      }),
+    // Only the GET is inside this catch. Wrapping the parse in it too is what
+    // made a malformed body indistinguishable from a missing one — and neither
+    // "pending" nor a throw settles the row.
+    out = await s3.send(
+      new GetObjectCommand({ Bucket: docsBucket(), Key: resultKeyFor(tenantId, jobId) }),
     );
-    if (out.Body === undefined) {
-      return { status: "pending" };
-    }
-    return { status: "ready", result: JSON.parse(await out.Body.transformToString()) };
   } catch (err) {
     const name = typeof err === "object" && err !== null ? (err as { name?: unknown }).name : "";
     if (name === "NoSuchKey" || name === "NotFound") {
       return { status: "pending" };
     }
     throw err;
+  }
+
+  if (out.Body === undefined) {
+    return { status: "pending" };
+  }
+  // Checked BEFORE the body is streamed: the point of a cap is not to reject a
+  // large string after paying to build it, and this Lambda's memory is the
+  // budget an oversized object would eat.
+  if ((out.ContentLength ?? 0) > MAX_RESULT_BYTES) {
+    return { status: "malformed", reason: `resultado excede ${String(MAX_RESULT_BYTES)} bytes` };
+  }
+
+  let text: string;
+  try {
+    text = await out.Body.transformToString();
+  } catch (err) {
+    return { status: "malformed", reason: `falha ao ler o corpo: ${describe(err)}` };
+  }
+  // The backstop for a missing or lying ContentLength.
+  if (text.length > MAX_RESULT_BYTES) {
+    return { status: "malformed", reason: `resultado excede ${String(MAX_RESULT_BYTES)} bytes` };
+  }
+
+  try {
+    return { status: "ready", result: JSON.parse(text) as unknown };
+  } catch (err) {
+    return { status: "malformed", reason: `corpo não é JSON: ${describe(err)}` };
   }
 }
