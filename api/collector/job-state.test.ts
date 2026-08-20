@@ -24,7 +24,9 @@ import {
   JOB_STATUSES,
   loadJobById,
   loadJobByS3Key,
+  loadLatestJobForDocument,
   MAX_ATTEMPTS,
+  resolveRevisarJob,
   transition,
   type DbLike,
   type JobStatus,
@@ -297,5 +299,80 @@ describe("loadJobByS3Key / loadJobById", () => {
     const { db, where } = makeSelectDb([]);
     await expect(loadJobById(db, OTHER_TENANT, ROW_ID)).resolves.toBeUndefined();
     expect(renderedWhere(where).params).toEqual([ROW_ID, OTHER_TENANT]);
+  });
+});
+
+// §4.2's one human-driven transition. It is not routed through `transition`
+// (whose forward-only rule is about the MACHINE's writes, where the only legal
+// move is out of `pending`), so it needs its own proof that it is still a
+// compare-and-set and still tenant-scoped.
+describe("resolveRevisarJob — the human's revisar → done", () => {
+  it("compare-and-sets on tenant, document, kind AND status = revisar", async () => {
+    const { db, set, where } = makeUpdateDb(1);
+
+    await resolveRevisarJob(db, {
+      tenantId: TENANT,
+      userId: "user-1",
+      documentId: ROW_ID,
+      kind: "extract",
+    });
+
+    const { sql, params } = renderedWhere(where);
+    expect(sql).toContain('"tenant_id" =');
+    expect(sql).toContain('"document_id" =');
+    expect(sql).toContain('"kind" =');
+    expect(sql).toContain('"status" =');
+    expect(params).toContain(TENANT);
+    expect(params).toContain("extract");
+    expect(params).toContain("revisar");
+
+    // Unlike every other write in this file, a PERSON did this one.
+    expect(set).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "done", lastUpdBy: "user-1" }),
+    );
+  });
+
+  // A double-clicked [Salvar correção], or two tabs. Nothing matched is an
+  // ordinary outcome, not an error.
+  it("reports zero when the row has already been resolved", async () => {
+    const { db } = makeUpdateDb(0);
+    await expect(
+      resolveRevisarJob(db, {
+        tenantId: TENANT,
+        userId: "user-1",
+        documentId: ROW_ID,
+        kind: "extract",
+      }),
+    ).resolves.toBe(0);
+  });
+
+  it("cannot reach another tenant's row", async () => {
+    const { db, where } = makeUpdateDb(0);
+    await resolveRevisarJob(db, {
+      tenantId: OTHER_TENANT,
+      userId: "user-1",
+      documentId: ROW_ID,
+      kind: "extract",
+    });
+    expect(renderedWhere(where).params).toContain(OTHER_TENANT);
+    expect(renderedWhere(where).params).not.toContain(TENANT);
+  });
+});
+
+describe("loadLatestJobForDocument", () => {
+  it("scopes by tenant, document and kind", async () => {
+    const rows = [{ id: ROW_ID }];
+    const limit = vi.fn().mockResolvedValue(rows);
+    const orderBy = vi.fn().mockReturnValue({ limit });
+    const where = vi.fn().mockReturnValue({ orderBy });
+    const from = vi.fn().mockReturnValue({ where });
+    const select = vi.fn().mockReturnValue({ from });
+    const db = { select } as unknown as DbLike;
+
+    await expect(loadLatestJobForDocument(db, TENANT, ROW_ID, "extract")).resolves.toEqual(rows[0]);
+
+    const { params } = renderedWhere(where);
+    expect(params).toContain(TENANT);
+    expect(params).toContain("extract");
   });
 });

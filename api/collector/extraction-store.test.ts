@@ -10,7 +10,11 @@ import { describe, it, expect, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import { extractions } from "../../drizzle/schema";
-import { insertExtractionIdempotent, resolveExtractionTarget } from "./extraction-store";
+import {
+  insertExtractionIdempotent,
+  loadTemplateFields,
+  resolveExtractionTarget,
+} from "./extraction-store";
 import type { DbLike } from "./job-state";
 
 const TENANT = "org_2abcTENANT";
@@ -136,5 +140,65 @@ describe("insertExtractionIdempotent", () => {
     const payload = values.mock.calls[0]?.[0] as Record<string, unknown>;
     expect("createdBy" in payload).toBe(false);
     expect("lastUpdBy" in payload).toBe(false);
+  });
+});
+
+// The collector needs the frozen list to decide §4.2's fork, and it must be
+// the SAME tree `buildZodSchema`, the extractor prompt and the repair screen
+// read — `parent_field_id` must not leak past this function.
+describe("loadTemplateFields", () => {
+  function makeFieldDb(rows: unknown[]) {
+    const where = vi.fn().mockResolvedValue(rows);
+    const from = vi.fn().mockReturnValue({ where });
+    const select = vi.fn().mockReturnValue({ from });
+    return { db: { select } as unknown as DbLike, where };
+  }
+
+  it("returns the ordered tree, nesting resolved from parent_field_id", async () => {
+    const { db } = makeFieldDb([
+      {
+        id: "f-2",
+        parentFieldId: null,
+        name: "itens",
+        type: "object[]",
+        required: true,
+        description: "linhas",
+        sortOrder: 1,
+      },
+      {
+        id: "f-1",
+        parentFieldId: null,
+        name: "numero",
+        type: "string",
+        required: true,
+        description: "nº",
+        sortOrder: 0,
+      },
+      {
+        id: "f-3",
+        parentFieldId: "f-2",
+        name: "total",
+        type: "money",
+        required: true,
+        description: "total da linha",
+        sortOrder: 0,
+      },
+    ]);
+
+    const fields = await loadTemplateFields(db, TENANT, TARGET.extractTemplateId);
+
+    expect(fields.map((f) => f.name)).toEqual(["numero", "itens"]);
+    expect(fields[1]?.fields?.map((f) => f.name)).toEqual(["total"]);
+  });
+
+  // Tenant-scoped even though the template id is already the tenant's: the id
+  // arrives from a row this function did not read.
+  it("scopes the read by tenant and by template, excluding soft-deleted rows", async () => {
+    const { db, where } = makeFieldDb([]);
+    await loadTemplateFields(db, TENANT, TARGET.extractTemplateId);
+    const sql = rendered(where);
+    expect(sql).toContain('"tenant_id" =');
+    expect(sql).toContain('"extract_template_id" =');
+    expect(sql).toContain('"deleted_at" is null');
   });
 });

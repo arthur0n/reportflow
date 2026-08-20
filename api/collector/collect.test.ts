@@ -63,8 +63,48 @@ const JOB_A2 = `${BASE}-a2`;
 const ROW_ID = "11111111-1111-4111-8111-111111111111";
 const DOC_ID = "22222222-2222-4222-8222-222222222222";
 
-/** The canonical job payload the API enqueued (§6), as stored on the row. */
-const REQUEST = { channel: "ai", kind: "extract", tenantId: TENANT, provider: "gemini" };
+/** The frozen field list `SUCCESS` is validated against (§3.1). Deliberately
+ * the REAL `validateExtraction` runs over it — shared/validation is not mocked
+ * here, because the property under test in the two cases below is precisely
+ * that an invalid payload takes the retry road and a valid one does not, and a
+ * stubbed validator would be the thing deciding that. */
+const FIELDS = [{ name: "total", type: "integer", required: true, description: "total" }];
+
+const TEMPLATE_ID = "33333333-3333-4333-8333-333333333333";
+
+/**
+ * The canonical job payload the API enqueued (§6), as stored on the row.
+ *
+ * It carries the TEMPLATE BINDING (`extractTemplate`) the collector judges the
+ * answer by — the frozen list as the model saw it, plus the calibration
+ * generation it was built for (codex review, 2026-08-20).
+ * api/extraction/extract-job.ts is deliberately NOT mocked: its reader is what
+ * decides whether a stored row is usable at all, and a stub would answer that
+ * question for it.
+ */
+function request(over: Record<string, unknown> = {}) {
+  return {
+    channel: "ai",
+    kind: "extract",
+    tenantId: TENANT,
+    provider: "gemini",
+    extractTemplate: { templateId: TEMPLATE_ID, calibrationRev: 1, fields: FIELDS },
+    ...over,
+  };
+}
+
+const REQUEST = request();
+
+/** A job row whose stored payload declares `fields` as its frozen list — the
+ * one axis every §4.2 validation case below varies. */
+function rowWithFields(fields: unknown[], over: Record<string, unknown> = {}) {
+  return jobRow({
+    request: request({
+      extractTemplate: { templateId: TEMPLATE_ID, calibrationRev: 1, fields },
+    }),
+    ...over,
+  });
+}
 
 const SUCCESS = {
   content: '{"total":10}',
@@ -78,7 +118,7 @@ const PERMANENT = { error: { type: "permanent", message: "unknown provider" } };
 
 const TARGET = {
   documentId: DOC_ID,
-  extractTemplateId: "33333333-3333-4333-8333-333333333333",
+  extractTemplateId: TEMPLATE_ID,
   s3Key: `${TENANT}/doc.pdf`,
   calibrationRev: 1,
 };
@@ -236,6 +276,134 @@ describe("extract results", () => {
 
   it("never writes an extraction from an error result", async () => {
     await collect(TRANSIENT);
+    expect(store.insertExtractionIdempotent).not.toHaveBeenCalled();
+  });
+
+  // §4.2's fork, and the reason it lives in this file: an extraction that
+  // fails the frozen field list takes the SAME road as a relay failure —
+  // "most schema violations are transient" — which means it spends the one
+  // retry this file owns.
+  it("retries once when the payload fails the frozen field list", async () => {
+    state.loadJobByS3Key.mockResolvedValue(
+      rowWithFields([
+        { name: "total", type: "integer", required: true, description: "total" },
+        { name: "data", type: "date", required: true, description: "emissão" },
+      ]),
+    );
+    await expect(collect(SUCCESS)).resolves.toEqual({
+      action: "retried",
+      jobId: JOB_A2,
+      attempt: 2,
+    });
+    expect(enqueue).toHaveBeenCalledOnce();
+  });
+
+  // Nothing invalid is ever cached: `extractions.data` is what hop 2 reads,
+  // and an invalid row there is a garbage analysis waiting for the first
+  // caller who forgets to check a status. The paid read survives on
+  // `report_jobs.result`, which the transition writes.
+  it("caches nothing when the payload fails the frozen field list", async () => {
+    state.loadJobByS3Key.mockResolvedValue(
+      rowWithFields([{ name: "total", type: "money", required: true, description: "total" }]),
+    );
+    await collect(SUCCESS);
+    expect(store.insertExtractionIdempotent).not.toHaveBeenCalled();
+  });
+
+  // Second attempt, same violation: the ceiling is reached and a HUMAN is the
+  // next step — `revisar`, not `failed`, because there is a per-field repair
+  // to offer.
+  it("lands an invalid payload in revisar once the retry is spent", async () => {
+    state.loadJobByS3Key.mockResolvedValue(
+      rowWithFields([{ name: "total", type: "money", required: true, description: "total" }], {
+        attempt: 2,
+        s3Key: `jobs/${TENANT}/${JOB_A2}.json`,
+      }),
+    );
+    await expect(collect(SUCCESS, JOB_A2)).resolves.toEqual({
+      action: "settled",
+      status: "revisar",
+    });
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(store.insertExtractionIdempotent).not.toHaveBeenCalled();
+  });
+
+  // A required field the model simply did not return — §4.2's other half of
+  // the same condition ("Zod valid AND all required fields present").
+  it("treats a missing required field as invalid", async () => {
+    state.loadJobByS3Key.mockResolvedValue(
+      rowWithFields([
+        { name: "total", type: "integer", required: true, description: "total" },
+        { name: "iva", type: "money", required: true, description: "iva" },
+      ]),
+    );
+    await expect(collect(SUCCESS)).resolves.toMatchObject({ action: "retried" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §12.8's invalidate semantics, meeting a job that was already in flight
+// (codex review, 2026-08-20). A human freezes rev N+1 while a rev-N extraction
+// is out at the provider; the result comes back ~30s later.
+// ---------------------------------------------------------------------------
+
+describe("a template recalibrated while the extraction was in flight", () => {
+  it("judges the answer by the list the MODEL saw, not by the live one", async () => {
+    // The live template has moved to rev 2 and would demand a second field.
+    // The job's own list has one. The answer satisfies the job's list, so it
+    // must not be reported as invalid — the model was never shown the new one.
+    store.resolveExtractionTarget.mockResolvedValue({ ...TARGET, calibrationRev: 2 });
+
+    const outcome = await collect(SUCCESS);
+
+    expect(outcome).toEqual({ action: "settled", status: "revisar" });
+    // Not a retry: nothing about the ANSWER was wrong, so §4.2's one retry is
+    // not spent on it.
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  // "Recalibrating a document type marks existing extractions for that type
+  // stale" — an answer produced under the previous generation is stale BY
+  // DEFINITION, so it is not cached under either rev.
+  it("caches nothing and settles revisar with a re-run instruction", async () => {
+    store.resolveExtractionTarget.mockResolvedValue({ ...TARGET, calibrationRev: 2 });
+
+    await collect(SUCCESS);
+
+    expect(store.insertExtractionIdempotent).not.toHaveBeenCalled();
+    const patch = state.transition.mock.calls[0]?.[1] as { patch?: { error?: string } };
+    expect(patch.patch?.error).toBe("template recalibrado durante a extração; re-execute");
+  });
+
+  // Calibrate REPLACES rather than forks, so a soft-delete plus a fresh insert
+  // changes the template id while the rev could plausibly repeat. Comparing
+  // only the rev would let that answer through.
+  it("refuses a different template id even at the same rev", async () => {
+    store.resolveExtractionTarget.mockResolvedValue({
+      ...TARGET,
+      extractTemplateId: "99999999-9999-4999-8999-999999999999",
+    });
+    await expect(collect(SUCCESS)).resolves.toEqual({ action: "settled", status: "revisar" });
+    expect(store.insertExtractionIdempotent).not.toHaveBeenCalled();
+  });
+
+  it("stores normally when the template has not moved", async () => {
+    await expect(collect(SUCCESS)).resolves.toEqual({ action: "settled", status: "done" });
+    expect(store.insertExtractionIdempotent).toHaveBeenCalledOnce();
+  });
+
+  // No fallback to a live read: a live read IS the race. A row that cannot say
+  // which list it was built from is a row nobody can grade.
+  it("sends a job with no stored field list to revisar rather than reading live rows", async () => {
+    state.loadJobByS3Key.mockResolvedValue(jobRow({ request: { channel: "ai", kind: "extract" } }));
+    await expect(collect(SUCCESS)).resolves.toEqual({ action: "settled", status: "revisar" });
+    expect(store.resolveExtractionTarget).not.toHaveBeenCalled();
+    expect(store.insertExtractionIdempotent).not.toHaveBeenCalled();
+  });
+
+  it("refuses a stored field list that did not survive the jsonb round trip", async () => {
+    state.loadJobByS3Key.mockResolvedValue(rowWithFields(["total"]));
+    await expect(collect(SUCCESS)).resolves.toEqual({ action: "settled", status: "revisar" });
     expect(store.insertExtractionIdempotent).not.toHaveBeenCalled();
   });
 });

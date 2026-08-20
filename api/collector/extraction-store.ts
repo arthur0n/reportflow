@@ -19,7 +19,8 @@
 // new extraction under the OLD rev and the cache would serve it forever.
 
 import { and, eq, isNull } from "drizzle-orm";
-import { documents, extractions, extractTemplates } from "../../drizzle/schema";
+import { documents, extractions, extractFields, extractTemplates } from "../../drizzle/schema";
+import { buildFieldTree, type FieldSpec } from "../../shared/validation/field-spec";
 import type { DbLike } from "./job-state";
 
 /** Everything `extractions` needs that is not in the model's answer. */
@@ -112,4 +113,44 @@ export async function insertExtractionIdempotent(
     .onConflictDoNothing({ target: [extractions.s3Key, extractions.calibrationRev] })
     .returning({ id: extractions.id });
   return { created: inserted.length === 1 };
+}
+
+/**
+ * The frozen field list for a template, as the TREE everything downstream
+ * reads (`buildZodSchema`, the extractor prompt, the repair screen).
+ *
+ * It lives here rather than being reached through
+ * api/services/calibration-service.ts's `getTemplate` because the COLLECTOR
+ * needs it (§4.2: an extraction is only `done` if it validates against this
+ * list) and the collector must not import a tRPC-flavoured service that
+ * throws `TRPCError` at a Lambda with no request to answer. Same table, same
+ * `buildFieldTree`, no second opinion about ordering or nesting.
+ *
+ * Tenant-scoped even though `extract_template_id` is already the tenant's:
+ * the id arrives from a row this function did not read.
+ */
+export async function loadTemplateFields(
+  dbHandle: DbLike,
+  tenantId: string,
+  extractTemplateId: string,
+): Promise<FieldSpec[]> {
+  const rows = await dbHandle
+    .select({
+      id: extractFields.id,
+      parentFieldId: extractFields.parentFieldId,
+      name: extractFields.name,
+      type: extractFields.type,
+      required: extractFields.required,
+      description: extractFields.description,
+      sortOrder: extractFields.sortOrder,
+    })
+    .from(extractFields)
+    .where(
+      and(
+        eq(extractFields.extractTemplateId, extractTemplateId),
+        eq(extractFields.tenantId, tenantId),
+        isNull(extractFields.deletedAt),
+      ),
+    );
+  return buildFieldTree(rows);
 }

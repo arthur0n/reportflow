@@ -40,6 +40,28 @@ export type {
 } from "./field-spec";
 
 export {
+  PROBLEM_LABEL,
+  pathKey,
+  problemsAt,
+  valueAtPath,
+  findFieldSpec,
+  parseMoneyToCents,
+  validateExtraction,
+} from "./extraction-validation";
+export type { ProblemCode, FieldProblem, ExtractionValidation } from "./extraction-validation";
+
+export {
+  StartExtractionInput,
+  GetExtractionInput,
+  CorrectExtractionInput,
+} from "./extraction-schemas";
+export type {
+  StartExtractionInputT,
+  GetExtractionInputT,
+  CorrectExtractionInputT,
+} from "./extraction-schemas";
+
+export {
   FieldTypeZ,
   LeafFieldTypeZ,
   InputModeZ,

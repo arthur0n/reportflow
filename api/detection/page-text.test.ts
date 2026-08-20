@@ -9,7 +9,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { extractPageOneText } from "./page-text";
+import { extractDocumentText, extractPageOneText } from "./page-text";
 import { buildMinimalPdf } from "./__fixtures__/make-minimal-pdf";
 
 describe("extractPageOneText — synthetic fixtures", () => {
@@ -39,6 +39,29 @@ describe("extractPageOneText — synthetic fixtures", () => {
     const pdf = buildMinimalPdf(["SÓ A PÁGINA 1"]);
     const text = await extractPageOneText(pdf);
     expect(text).toBe("SÓ A PÁGINA 1");
+  });
+});
+
+// The `input_mode: 'text'` half of §3.1 — the extraction hop needs EVERY
+// page, not just page 1, and it needs the page boundaries legible because
+// §6.1 makes the page a self-reported field.
+describe("extractDocumentText — synthetic fixtures", () => {
+  it("marks the page and keeps the text, accents intact", async () => {
+    const pdf = buildMinimalPdf(["FATURA EXEMPLO Ç Ã", "Segunda linha"]);
+    await expect(extractDocumentText(pdf)).resolves.toBe(
+      "[página 1]\nFATURA EXEMPLO Ç Ã\nSegunda linha",
+    );
+  });
+
+  // A scan. `null` and not a throw, for the same reason `extractPageOneText`
+  // answers `null`: the CALLER decides what a missing text layer means, and
+  // for text-mode extraction it means "refuse", not "crash".
+  it("returns null when no page carries any text", async () => {
+    await expect(extractDocumentText(buildMinimalPdf([]))).resolves.toBeNull();
+  });
+
+  it("returns null for bytes that are not a parseable PDF", async () => {
+    await expect(extractDocumentText(Buffer.from("this is not a pdf at all"))).resolves.toBeNull();
   });
 });
 

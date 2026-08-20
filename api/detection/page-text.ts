@@ -78,3 +78,55 @@ export async function extractPageOneText(buffer: Buffer | Uint8Array): Promise<s
   const trimmed = text.trim();
   return trimmed.length > 0 ? trimmed : null;
 }
+
+/**
+ * The WHOLE document's text, page-numbered, or `null` when there is no text
+ * layer at all — the `input_mode: 'text'` half of §3.1.
+ *
+ * §3.1 is explicit that `input_mode` is a COST decision, not a capability
+ * one: "text mode" means the model is handed the extracted text layer
+ * INSTEAD of the PDF, at roughly a fifth to a twentieth of the price. So the
+ * extraction hop needs every page, not just page 1, and it needs the page
+ * boundaries visible — §6.1 keeps a self-reported `page` field on the
+ * extraction schema (citations and structured output cannot be combined), and
+ * a model asked to report a page number from an unmarked wall of text can
+ * only guess.
+ *
+ * `mergePages: false` then re-joined with an explicit marker, rather than
+ * `mergePages: true`: unpdf's merged form concatenates with newlines and
+ * loses exactly the boundary this needs.
+ *
+ * Same `null`-not-throw contract as `extractPageOneText`, and for the same
+ * reason — a scan has no text layer, and that is a FACT about the document
+ * for the caller to act on (here: refusing to run a text-mode extraction
+ * against a document that has no text), not an exception.
+ */
+export async function extractDocumentText(buffer: Buffer | Uint8Array): Promise<string | null> {
+  let pdf: Awaited<ReturnType<typeof getDocumentProxy>>;
+  try {
+    pdf = await getDocumentProxy(new Uint8Array(buffer));
+  } catch {
+    return null;
+  }
+
+  if (pdf.numPages < 1) {
+    return null;
+  }
+
+  let pages: string[];
+  try {
+    const result = await extractText(pdf, { mergePages: false });
+    pages = Array.isArray(result.text) ? result.text : [result.text];
+  } catch {
+    return null;
+  }
+
+  const rendered = pages
+    .map((text, index) => `[página ${String(index + 1)}]\n${text.trim()}`)
+    .join("\n\n")
+    .trim();
+
+  // Every page empty means no text layer — the pages themselves are still
+  // there, so `numPages` cannot answer this.
+  return pages.some((text) => text.trim().length > 0) ? rendered : null;
+}

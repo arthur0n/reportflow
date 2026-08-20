@@ -33,7 +33,7 @@
 // `done → pending` is a bug in the caller, and returning "no rows matched"
 // would let it read as the ordinary outcome and be swallowed.
 
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { reportJobs } from "../../drizzle/schema";
 import type { db } from "../db/client";
 
@@ -251,6 +251,78 @@ export async function loadJobById(
     .select()
     .from(reportJobs)
     .where(and(eq(reportJobs.id, id), eq(reportJobs.tenantId, tenantId)))
+    .limit(1);
+  return rows[0];
+}
+
+/**
+ * THE ONE TRANSITION A HUMAN MAKES: `revisar → done` (§4.2).
+ *
+ * Deliberately NOT routed through `transition`, and `isForward` is deliberately
+ * NOT loosened to admit it. Those guard the MACHINE's writes, where the only
+ * legal move is out of `pending` and where "the row is already terminal" always
+ * means "another writer got there first, stop". This is a different fact
+ * altogether: `revisar` is the one terminal status that is not the END of the
+ * work, it is a request for a person, and §4.2 says the person's answer is
+ * "persisted and never re-run". Folding it into `transition` would mean
+ * relaxing the forward-only rule for every collector call site in order to
+ * serve one router call site.
+ *
+ * It is still a compare-and-set, on `status = 'revisar'` and on the KIND: a
+ * job that has already been resolved (a double-clicked [Salvar correção], two
+ * open tabs) matches nothing and returns `false`, which the caller reports as
+ * "nothing to resolve" rather than as an error. Status still only moves
+ * forward — `done` is terminal and nothing here can move it back.
+ *
+ * `last_upd_by` IS stamped, unlike every other write in this file: a person
+ * did this one, and they are exactly who an audit would want to find.
+ */
+export async function resolveRevisarJob(
+  dbHandle: DbLike,
+  args: {
+    readonly tenantId: string;
+    readonly userId: string;
+    readonly documentId: string;
+    readonly kind: JobKind;
+  },
+): Promise<number> {
+  const rows = await dbHandle
+    .update(reportJobs)
+    .set({ status: "done", error: null, lastUpdAt: nowIso(), lastUpdBy: args.userId })
+    .where(
+      and(
+        eq(reportJobs.tenantId, args.tenantId),
+        eq(reportJobs.documentId, args.documentId),
+        eq(reportJobs.kind, args.kind),
+        eq(reportJobs.status, "revisar"),
+      ),
+    )
+    .returning({ id: reportJobs.id });
+  return rows.length;
+}
+
+/** The tenant's most recent job of one kind for a document — what the
+ * extraction screens read to know whether a hop is in flight, waiting on a
+ * human, or finished. Newest first, because a document may have been
+ * re-extracted after a recalibration (§12.8) and the LAST answer is the one
+ * the UI is about. */
+export async function loadLatestJobForDocument(
+  dbHandle: DbLike,
+  tenantId: string,
+  documentId: string,
+  kind: JobKind,
+): Promise<JobRow | undefined> {
+  const rows = await dbHandle
+    .select()
+    .from(reportJobs)
+    .where(
+      and(
+        eq(reportJobs.tenantId, tenantId),
+        eq(reportJobs.documentId, documentId),
+        eq(reportJobs.kind, kind),
+      ),
+    )
+    .orderBy(desc(reportJobs.createdAt))
     .limit(1);
   return rows[0];
 }

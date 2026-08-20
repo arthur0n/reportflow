@@ -347,6 +347,26 @@ export const reportJobs = pgTable(
   },
   (t) => [
     uniqueIndex("report_jobs_s3_key_idx").on(t.s3Key),
+    // ONE PENDING EXTRACT PER DOCUMENT, enforced by Postgres rather than by a
+    // read (codex review, 2026-08-20). `startExtraction` used to preflight
+    // with a SELECT for an in-flight job and then INSERT — check-then-act, so
+    // two concurrent calls (a double-clicked [Extrair], two tabs, a retried
+    // request) both read "nothing pending" and both enqueued a PAID hop. The
+    // §12.8 cache does not save you here: neither extraction exists yet, so
+    // both jobs run and both are billed.
+    //
+    // A partial unique index is the fix because the constraint is genuinely
+    // partial: `pending` is the only status that may not repeat. A document
+    // accumulates any number of settled extract jobs over its life (a retry
+    // that failed, a re-extraction after a recalibration), and a total unique
+    // index would forbid the second one forever.
+    //
+    // The insert then carries ON CONFLICT DO NOTHING and the LOSER re-reads
+    // the winner's row — so the loser returns the same jobId the winner did,
+    // and the caller cannot tell which of them it was.
+    uniqueIndex("report_jobs_pending_extract_idx")
+      .on(t.tenantId, t.documentId)
+      .where(sql`${t.status} = 'pending' AND ${t.kind} = 'extract'`),
     index("report_jobs_tenant_status_idx").on(t.tenantId, t.status),
     index("report_jobs_tenant_created_idx").on(t.tenantId, t.createdAt),
     index("report_jobs_document_idx").on(t.documentId),

@@ -23,16 +23,35 @@
 // result claims IS the tenant that paid for it, and every query below carries
 // it as a predicate — the collector never reads a row it was not sent to.
 //
-// WHAT THIS FILE WILL NOT DO. It does not validate the extraction against the
-// frozen field list, does not compute the §12.12 numeric guardrails, and does
-// not read a verifier's verdicts. Those need the template, the field list and
-// the report context; a collector that grew them would be the pipeline, and
-// would then need to be correct twice — once here and once wherever the retry
-// orchestration actually lives. It moves bytes, decides the job's fate from the
-// envelope, and stops.
+// WHAT THIS FILE DOES NOW DO, AND WHY IT HAD TO (2026-08-20, issue #8). It
+// validates an `extract` result against the frozen field list before calling
+// it `done`. That is not scope creep, it is §4.2's actual fork —
+//
+//     extract → Zod valid AND all required fields present?
+//       ✓ → analyse (unattended)
+//       ✗ → auto-retry once → revisar
+//
+// — and the retry is the reason it cannot live anywhere else. The retry
+// ORCHESTRATION is here (`enqueueRetry`, the attempt CAS, the ceiling); a
+// validator running downstream of this file would have no way to spend the one
+// retry §4.2 allows without reimplementing all of it. So the fork happens where
+// the fork's machinery already is. The validator ITSELF is not here — it is
+// shared/validation/extraction-validation.ts, built at runtime from the frozen
+// list, and the repair screen runs the identical function.
+//
+// WHAT THIS FILE STILL WILL NOT DO. It does not compute the §12.12(a)
+// arithmetic guardrails (those need a template-DECLARED relationship list that
+// does not exist yet — #10/#12), does not read a verifier's verdicts (§12.13),
+// and does not write charge rows (§12.6/#10). It moves bytes, decides the
+// job's fate, and stops.
 
 import { jobKeyFor, nextAttemptJobId, parseJobId, type JobIdParts } from "../lib/relay";
 import { insertExtractionIdempotent, resolveExtractionTarget } from "./extraction-store";
+import { RECALIBRATED_DURING_EXTRACTION, readExtractContext } from "../extraction/extract-job";
+import {
+  validateExtraction,
+  type FieldProblem,
+} from "../../shared/validation/extraction-validation";
 import {
   casAttempt,
   confirmEnqueue,
@@ -297,7 +316,58 @@ async function applyFailure(
 }
 
 /**
- * A successful EXTRACT hop: cache the artifact, then flip the job.
+ * The `report_jobs.error` a human lands on in `revisar`, built from the field
+ * problems that put them there.
+ *
+ * Bounded to the first few, for the same reason relay-result.ts bounds a
+ * provider's error text: this is a column, not a log. The SCREEN re-runs the
+ * validator against the payload and shows every problem in place — this string
+ * only has to say enough that a `revisar` in a list is legible without opening
+ * it.
+ */
+function describeProblems(problems: readonly FieldProblem[]): string {
+  const shown = problems.slice(0, 3).map((p) => p.message);
+  const rest = problems.length - shown.length;
+  const tail = rest > 0 ? ` (+${String(rest)})` : "";
+  return `extração inválida: ${shown.join("; ")}${tail}`.slice(0, 400);
+}
+
+/**
+ * A successful EXTRACT hop: validate it against the list it was BUILT from,
+ * refuse it if the template moved underneath, cache the artifact, flip the job.
+ *
+ * THE JOB IS JUDGED BY ITS OWN FIELD LIST (codex review, 2026-08-20). The
+ * frozen list travels on the payload and survives on `report_jobs.request`
+ * (api/extraction/extract-job.ts `readExtractContext`), so it is read from
+ * there and NOT from the live `extract_fields` rows. Re-reading live rows was
+ * a race with §12.8: a human freezing rev N+1 while a rev-N job is in flight
+ * would have had the model's answer graded against a list it was never shown.
+ *
+ * AND A STALE ANSWER IS NOT CACHED AT ALL. Once the payload validates, the
+ * job's own rev is compared against the template's CURRENT one, and a mismatch
+ * settles `revisar` with nothing written. §12.8 decided recalibration
+ * INVALIDATES — an answer produced under the previous generation is stale BY
+ * DEFINITION, so storing it under either rev would be a lie: under the old rev
+ * it is a row no cache lookup will ever hit again, and under the new one it is
+ * an answer to a question nobody asked. A `revisar` a human can re-run is
+ * cheap and honest.
+ *
+ * VALIDATION IS FIRST, and an invalid payload takes the SAME road as a relay
+ * failure — `applyFailure`, which spends §4.2's one retry and then settles at
+ * `revisar`. "Most schema violations are transient" is the design's own
+ * sentence about exactly this case, and routing it anywhere else would mean two
+ * retry ceilings that have to agree. The retry re-enqueues the STORED payload,
+ * so attempt 2 runs the same frozen list attempt 1 was billed for — and lands
+ * on the same staleness check.
+ *
+ * NOTHING INVALID IS EVER WRITTEN TO `extractions`. That table is what hop 2
+ * reads (§4: "three templates over the same document = one extraction, three
+ * analyses"), and its `data` column is documented as the VALIDATED payload —
+ * an invalid row there is a garbage analysis waiting for the first caller who
+ * forgets to check a status. The paid read is not lost either: the relay
+ * envelope is written verbatim to `report_jobs.result` by the transition below,
+ * and that is what the repair screen reads to show the human what the model
+ * actually said (§4.2 — "every value shown, problems flagged, all editable").
  *
  * The extraction is written BEFORE the status moves, and that order is the
  * idempotency. If the process dies between the two, the row is still `pending`,
@@ -314,12 +384,30 @@ async function applyExtractSuccess(
   if (documentId === null) {
     return settle(deps, ctx, "revisar", "job de extração sem documento associado");
   }
+  // No fallback to a live read: a live read IS the race this closes, and
+  // silently doing the wrong thing is worse than one document waiting for a
+  // person.
+  const context = readExtractContext(ctx.row.request);
+  if (context === null) {
+    return settle(deps, ctx, "revisar", "job de extração sem a lista de campos congelada");
+  }
   const parsed = parseModelJson(success.content);
   if (!parsed.ok) {
     // §4.2 — "most schema violations are transient". Same path as a relay
     // failure, same ceiling, same landing in `revisar`.
     return applyFailure(deps, ctx, { kind: "failure", type: "transient", message: parsed.message });
   }
+
+  // §4.2's fork, against the list the model actually saw.
+  const validation = validateExtraction(context.fields, parsed.data);
+  if (!validation.ok) {
+    return applyFailure(deps, ctx, {
+      kind: "failure",
+      type: "transient",
+      message: describeProblems(validation.problems),
+    });
+  }
+
   const target = await resolveExtractionTarget(deps.db, ctx.tenantId, documentId);
   if (target === null) {
     // A configuration problem (no detected type, or a soft-deleted template),
@@ -327,6 +415,18 @@ async function applyExtractSuccess(
     // missing row. Straight to `revisar`.
     return settle(deps, ctx, "revisar", "documento sem template de extração ativo");
   }
+
+  // §12.8's invalidate semantics, checked at the last possible moment — after
+  // the answer is known good and before a single row is written. The template
+  // ID is compared too: Calibrate replaces rather than forks, so a soft-delete
+  // plus a fresh insert changes the id while the rev could plausibly repeat.
+  if (
+    target.extractTemplateId !== context.templateId ||
+    target.calibrationRev !== context.calibrationRev
+  ) {
+    return settle(deps, ctx, "revisar", RECALIBRATED_DURING_EXTRACTION);
+  }
+
   await insertExtractionIdempotent(deps.db, ctx.tenantId, target, parsed.data, {
     provider: success.provider,
     model: success.model,

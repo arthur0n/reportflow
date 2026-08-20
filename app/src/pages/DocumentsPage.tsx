@@ -13,6 +13,10 @@
 //   * a "Detectar tipo" trigger for a document with no type yet, since there
 //     is no upload flow in this app to fire it automatically post-confirm
 //
+// It also carries hop 1's status column (§4.2's five states) and the entry
+// point into the repair screen, for the same reason: there is no other surface
+// from which a `revisar` would ever be noticed.
+//
 // Upload itself (presigned POST, drag-and-drop, …) is out of scope here —
 // this page assumes documents already exist.
 
@@ -39,6 +43,7 @@ import {
 } from "@/components/ui/table";
 import { trpc, type TrpcOutput } from "@/shared/lib/trpc";
 import { useDocumentTypes, type DocumentTypeOption } from "@/hooks/use-document-types";
+import { ExtractionCell } from "@/features/extraction/ExtractionCell";
 
 type DocumentRow = TrpcOutput["documents"]["list"][number];
 
@@ -171,8 +176,19 @@ function DetectionCell({
 
 export function DocumentsPage(): ReactElement {
   const listQuery = trpc.documents.list.useQuery();
+  // One extra query rather than a column on `documents.list`: hop 1's status
+  // depends on the template's CURRENT calibration rev (§12.8), which is not a
+  // fact about a document row, and polling it separately keeps the list itself
+  // a plain read.
+  const extractionQuery = trpc.extractions.list.useQuery(undefined, {
+    refetchInterval: (q) =>
+      (q.state.data ?? []).some((r) => r.status === "running") ? 2000 : false,
+  });
   const { options } = useDocumentTypes();
   const documents = listQuery.data ?? [];
+  const extractionByDocument = new Map(
+    (extractionQuery.data ?? []).map((row) => [row.documentId, row]),
+  );
 
   return (
     <AppLayout>
@@ -202,6 +218,7 @@ export function DocumentsPage(): ReactElement {
             <TableRow>
               <TableHead>Arquivo</TableHead>
               <TableHead>Tipo de documento</TableHead>
+              <TableHead>Extração</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -212,6 +229,13 @@ export function DocumentsPage(): ReactElement {
                 </TableCell>
                 <TableCell>
                   <DetectionCell doc={doc} options={options} />
+                </TableCell>
+                <TableCell>
+                  <ExtractionCell
+                    documentId={doc.id}
+                    row={extractionByDocument.get(doc.id)}
+                    hasType={doc.documentTypeId !== null}
+                  />
                 </TableCell>
               </TableRow>
             ))}

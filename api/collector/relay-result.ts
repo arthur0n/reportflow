@@ -8,14 +8,15 @@
 // Two bundles, no shared import, so this is the API-side statement of that
 // contract and api/collector/relay-result.test.ts is what keeps the two honest.
 //
-// THIS IS THE ONLY VALIDATION THE COLLECTOR DOES, and it is structural.
-// Field-level validation against the frozen field list belongs to the extract
-// template that owns the field list, not to the mover of bytes — the collector
-// would need the runtime-built Zod schema, the template rows, and a reason to
-// disagree with the hop that already asked for structured output. What it does
-// need is to tell three cases apart: a usable answer, an answer-shaped thing
-// that is not usable, and an explicit failure. Everything downstream forks on
-// exactly that.
+// THE VALIDATION HERE IS STRUCTURAL, and it is the FIRST of two. This file
+// answers one question about the ENVELOPE — a usable answer, an answer-shaped
+// thing that is not usable, or an explicit failure — and everything downstream
+// forks on exactly that. The second question, "is the extraction valid against
+// the frozen field list", is §4.2's own fork and lives in
+// shared/validation/extraction-validation.ts, called from collect.ts because
+// that is where the one retry §4.2 allows is spent. Keeping them apart is what
+// lets a `detect` or `analyse` result run through this file without dragging a
+// field list it has no use for.
 
 /** A usable answer. `content` is raw model text — still unparsed, still
  * untrusted; `parseModelJson` is the next step and it can also fail. */

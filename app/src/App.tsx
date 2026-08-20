@@ -6,6 +6,7 @@ import { AdminGate } from "./pages/AdminGate";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DocumentsPage } from "./pages/DocumentsPage";
 import { CalibratePage } from "./pages/CalibratePage";
+import { RevisarPage } from "./features/extraction/RevisarPage";
 import { TenantValuesKindPage } from "./pages/TenantValuesKindPage";
 import { AdminLovCatalogPage } from "./pages/AdminLovCatalogPage";
 
@@ -28,6 +29,15 @@ export default function App(): ReactElement {
       <Route path="/documents">
         <Protected>
           <DocumentsPage />
+        </Protected>
+      </Route>
+      {/* §4.2's repair screen. Reachable from the documents list whenever a
+          document has an extraction to look at — not only when the job is in
+          `revisar`, since a validated-but-wrong read is exactly the failure
+          nothing else surfaces (§3.3). */}
+      <Route path="/documentos/:id/revisar">
+        <Protected>
+          <RevisarPage />
         </Protected>
       </Route>
       <Route path="/calibrate">

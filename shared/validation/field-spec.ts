@@ -103,9 +103,26 @@ export interface FieldSpec {
  * prints the same amount in the spaced, spelled-out form. The model was right
  * and the field list was wrong — precisely what Calibrate's human step exists
  * for.
+ *
+ * THIS REGEX IS THE DEFINITION OF THE MONEY LANGUAGE, and it is the ONLY one
+ * (codex review, 2026-08-20). `parseMoneyToCents`
+ * (./extraction-validation.ts) gates on this exact pattern before it reads a
+ * digit, because the alternative — two hand-written notions of "is this
+ * money" — had already drifted: the grouped-only v2 rejected the
+ * separator-free `1234,56` that the parser happily read as `123456` cents.
+ * A value the validator refuses and the arithmetic accepts is the worst of
+ * both: `revisar` for a number that was never wrong, and, the day the two
+ * swap roles, silent arithmetic on a string nothing validated.
+ *
+ * SEPARATOR-FREE INTEGER PARTS ARE ACCEPTED. Real documents print `1234,56`
+ * as often as `1.234,56` — thousands grouping is a typographic choice, not a
+ * fact about the amount. Both branches are spelled out rather than collapsed
+ * into one permissive `[\d.\u00a0\u202f\u2009 ]+`, so a HALF-grouped value
+ * (`12.3456,78`) is still refused: it is the shape a mis-read produces, and
+ * nothing legitimate prints it.
  */
 export const MONEY_RE =
-  /^-?\d{1,3}(?:[.\u00a0\u202f\u2009 ]\d{3})*,\d{2}(?:\s*(?:\u20ac|euros?))?$/u;
+  /^-?(?:\d{1,3}(?:[.\u00a0\u202f\u2009 ]\d{3})+|\d+),\d{2}(?:\s*(?:\u20ac|euros?))?$/u;
 
 export const DATE_RE = /^\d{2}\/\d{2}\/\d{4}$/u;
 
