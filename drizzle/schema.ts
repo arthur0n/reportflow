@@ -1,23 +1,23 @@
 // drizzle/schema.ts
 //
-// Baseline MVP schema (post-domain-prune). Tables:
-//   1. tenants                  — our system-of-record for orgs (auth provider is an adapter)
-//   2. users                    — authorization. Role lives here, not in auth provider.
-//   2b. memberships             — per-tenant grants (see tenancy pass for the Clerk-org rewrite).
-//   3. list_of_values           — shared dictionary; rows are either system
+// Baseline MVP schema (post-domain-prune, org-based tenancy). Tables:
+//   1. users                    — authorization. Identity is (open_id, tenant_id);
+//                                  `role` is the permanent authorization layer.
+//   2. list_of_values           — shared dictionary; rows are either system
 //                                  (tenant_id IS NULL) or tenant-scoped.
-//   4. tenant_values            — per-tenant lookup-style records; `kind` is the
+//   3. tenant_values            — per-tenant lookup-style records; `kind` is the
 //                                  discriminator and matches a list_of_values row
-//                                  of type='TENANT_VALUES' (kinds: SUPPLIER, CUSTOMER,
-//                                  CASH_BOX, BUSINESS_UNIT).
-//   5. audit_logs               — generic field-level audit trail (tenant-scoped)
+//                                  of type='TENANT_VALUES'.
+//   4. audit_logs               — generic field-level audit trail (tenant-scoped)
 //
-// tenant_id is always uuid — FK to tenants.id. Our system owns tenant identity;
-// the auth provider is an adapter. External provider IDs stored on
-// tenants/users as external_id.
+// Tenancy (project_conventions §6): `tenant_id === Clerk org_id`. A tenant is a
+// Clerk organization, not a local row — there is no `tenants` table and no
+// `memberships` table. `tenant_id` is therefore ALWAYS `varchar(64)` (an opaque
+// string like `org_2abc…`), never `uuid`, and never a foreign key.
 //
 // Convention: every new table MUST also get a TABLE_SCOPE entry in
-// api/db/scope.ts — that's how multi-tenant + soft-delete stay enforced.
+// api/db/scope.ts — `conditions()` throws on an unregistered table
+// (decisions §12.9), so a forgotten entry is a dev-time crash, not a leak.
 
 import { sql } from "drizzle-orm";
 import {
@@ -27,71 +27,42 @@ import {
   text,
   varchar,
   integer,
-  smallint,
   timestamp,
   uniqueIndex,
   check,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 
-// ---------------------------------------------------------------------------
-// 1. tenants — system-of-record for orgs
-// ---------------------------------------------------------------------------
-
-export const tenants = pgTable(
-  "tenants",
-  {
-    id: uuid().defaultRandom().primaryKey().notNull(),
-    externalId: varchar("external_id", { length: 64 }).notNull().unique(),
-    name: text().notNull(),
-    cnpj: varchar({ length: 18 }),
-    industry: text().notNull().default("restaurant"),
-    fiscalYearStart: smallint("fiscal_year_start").notNull().default(1),
-    timezone: text().notNull().default("America/Sao_Paulo"),
-    // Billing scaffold. Field-only — no Stripe yet. Mutated by manual SQL
-    // until the billing UI lands. (plan, trial_ends_at) encodes lifecycle
-    // without a separate subscription_status column.
-    plan: varchar({ length: 32 }).notNull().default("friends_and_family"),
-    trialEndsAt: timestamp("trial_ends_at", { withTimezone: true, mode: "string" }),
-    billingEmail: varchar("billing_email", { length: 320 }),
-    // UI surface gate. 'import_only' is currently unused pending the
-    // domain rebuild (see pass-a scaffold prune); kept as a schema field.
-    mode: varchar({ length: 16 }).notNull().default("full"),
-    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
-      .defaultNow()
-      .notNull(),
-    createdBy: uuid("created_by"),
-    lastUpdAt: timestamp("last_upd_at", { withTimezone: true, mode: "string" })
-      .defaultNow()
-      .notNull(),
-    lastUpdBy: uuid("last_upd_by"),
-    deletedAt: timestamp("deleted_at", { withTimezone: true, mode: "string" }),
-    deletedBy: uuid("deleted_by"),
-  },
-  (t) => [
-    uniqueIndex("tenants_cnpj_idx")
-      .on(t.cnpj)
-      .where(sql`${t.cnpj} IS NOT NULL`),
-    check("tenants_plan_check", sql`${t.plan} IN ('friends_and_family', 'free', 'paid')`),
-    check("tenants_mode_check", sql`${t.mode} IN ('full', 'import_only')`),
-  ],
-);
+/** Clerk org id column type. One definition, reused by every scoped table. */
+const TENANT_ID_LENGTH = 64;
 
 // ---------------------------------------------------------------------------
-// 2. users — identity (tenant-independent). Per-tenant authority lives in
-//    memberships. active_tenant_id is the user's currently-selected tenant
-//    (Salesforce model); platform_role flags ReportFlow staff with
-//    cross-tenant authority via adminDb.
+// 1. users — identity + authorization.
+//
+// `open_id` is the auth provider's user id (Clerk `user_2abc…`). Identity is
+// the composite (open_id, tenant_id): the same Clerk user can belong to more
+// than one org with a different role in each — no schema change when the
+// second customer lands.
+//
+// Roles (decisions §2):
+//   platform_admin — ReportFlow staff (Arthur). Never crosses a tenant
+//                    boundary: admin surfaces touch only `global` / `lov`
+//                    tables. There is no unscoped db handle.
+//   admin          — the account's owner.
+//   member         — everyone else in the account.
+//
+// Rows are created manually (project_conventions §7) — no row, no access.
 // ---------------------------------------------------------------------------
 
 export const users = pgTable(
   "users",
   {
     id: uuid().defaultRandom().primaryKey().notNull(),
-    externalId: varchar("external_id", { length: 64 }).notNull(),
-    activeTenantId: uuid("active_tenant_id").references(() => tenants.id),
+    openId: varchar("open_id", { length: 64 }).notNull(),
+    tenantId: varchar("tenant_id", { length: TENANT_ID_LENGTH }).notNull(),
     email: varchar({ length: 320 }),
     name: text(),
+    role: varchar({ length: 20 }).notNull().default("member"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
@@ -102,69 +73,16 @@ export const users = pgTable(
     lastUpdBy: uuid("last_upd_by"),
   },
   (t) => [
-    uniqueIndex("users_external_id_idx").on(t.externalId),
-    index("users_active_tenant_idx").on(t.activeTenantId),
+    uniqueIndex("users_open_id_tenant_id_idx").on(t.openId, t.tenantId),
+    index("users_tenant_idx").on(t.tenantId),
+    check("users_role_check", sql`${t.role} IN ('platform_admin', 'admin', 'member')`),
   ],
 );
 
 // ---------------------------------------------------------------------------
-// 2b. memberships — per-tenant grants. Replaces users.tenant_id (dropped).
-//     Lifecycle by joined_at + expires_at + deleted_at; no status column.
-//       invited  → joined_at IS NULL    AND deleted_at IS NULL
-//       active   → joined_at IS NOT NULL AND deleted_at IS NULL
-//                  AND (expires_at IS NULL OR expires_at > now())
-//       expired  → expires_at < now() (computed)
-//       revoked  → deleted_at IS NOT NULL
-//     Roles: 'owner' | 'admin' | 'member' | 'consultant_view'. F&F today
-//     writes only 'owner'; the others are reserved for follow-up plans.
-// ---------------------------------------------------------------------------
-
-export const memberships = pgTable(
-  "memberships",
-  {
-    id: uuid().defaultRandom().primaryKey().notNull(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    tenantId: uuid("tenant_id")
-      .notNull()
-      .references(() => tenants.id),
-    // Numeric rank. 0 = reportflow, 1 = tenant admin (signup default).
-    // 10 / 20 / etc. reserved for later. Display labels in LOV
-    // type='MEMBERSHIP_ROLE'. Authority checks use `<=` against
-    // MEMBERSHIP_RANK constants in shared/constants/membership-roles.ts.
-    role: integer().notNull(),
-    invitedBy: uuid("invited_by").references((): AnyPgColumn => users.id),
-    invitedAt: timestamp("invited_at", { withTimezone: true, mode: "string" })
-      .defaultNow()
-      .notNull(),
-    joinedAt: timestamp("joined_at", { withTimezone: true, mode: "string" }),
-    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }),
-    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
-      .defaultNow()
-      .notNull(),
-    createdBy: uuid("created_by"),
-    lastUpdAt: timestamp("last_upd_at", { withTimezone: true, mode: "string" })
-      .defaultNow()
-      .notNull(),
-    lastUpdBy: uuid("last_upd_by"),
-    deletedAt: timestamp("deleted_at", { withTimezone: true, mode: "string" }),
-    deletedBy: uuid("deleted_by"),
-  },
-  (t) => [
-    uniqueIndex("memberships_user_tenant_unique")
-      .on(t.userId, t.tenantId)
-      .where(sql`${t.deletedAt} IS NULL`),
-    index("memberships_user_idx").on(t.userId),
-    index("memberships_tenant_idx").on(t.tenantId, t.deletedAt),
-    check("memberships_role_check", sql`${t.role} >= 0`),
-  ],
-);
-
-// ---------------------------------------------------------------------------
-// 3. list_of_values — canonical lookup table (system + per-tenant rows)
-// Type discriminator values are UPPER_SNAKE_CASE (e.g. DRE_GROUP, CATEGORY).
-// Always query with both tenant_id and type filters via scope.lovConditions.
+// 2. list_of_values — canonical lookup table (system + per-tenant rows)
+// Type discriminator values are UPPER_SNAKE_CASE (e.g. TENANT_VALUES, BANK_SLUG).
+// Always query through scope.lovConditions — never scope.conditions.
 // ---------------------------------------------------------------------------
 
 export const listOfValues = pgTable(
@@ -176,9 +94,10 @@ export const listOfValues = pgTable(
     value: varchar({ length: 100 }).notNull(),
     description: text(),
     parentLov: uuid("parent_lov").references((): AnyPgColumn => listOfValues.id),
-    tenantId: uuid("tenant_id"),
-    // Sub-discriminator for system rows (e.g. 'restaurant' on system CATEGORY).
-    // NULL on tenant rows — their audience is already tenant_id + tenants.industry.
+    // NULL = system row (visible to every org). Non-null = a Clerk org_id.
+    tenantId: varchar("tenant_id", { length: TENANT_ID_LENGTH }),
+    // Optional sub-namespace for system rows, so independent system seeds of
+    // the same `type` don't overwrite each other. NULL on tenant rows.
     category: varchar({ length: 50 }),
     language: varchar({ length: 5 }).default("pt-BR"),
     sortOrder: integer("sort_order").default(0),
@@ -206,20 +125,16 @@ export const listOfValues = pgTable(
 );
 
 // ---------------------------------------------------------------------------
-// tenant_values — per-tenant lookup-style records.
+// 3. tenant_values — per-tenant lookup-style records.
 // `kind` is a varchar discriminator (e.g. 'SUPPLIER', 'CUSTOMER', 'CASH_BOX',
 // 'BUSINESS_UNIT') matching a list_of_values row of type='TENANT_VALUES'.
-// Same narrow shape as list_of_values; per-type extras would require a
-// separate sidecar table — none exist today.
 // ---------------------------------------------------------------------------
 
 export const tenantValues = pgTable(
   "tenant_values",
   {
     id: uuid().defaultRandom().primaryKey().notNull(),
-    tenantId: uuid("tenant_id")
-      .notNull()
-      .references(() => tenants.id),
+    tenantId: varchar("tenant_id", { length: TENANT_ID_LENGTH }).notNull(),
     kind: varchar({ length: 50 }).notNull(),
     code: varchar({ length: 50 }).notNull(),
     value: varchar({ length: 100 }).notNull(),
@@ -252,7 +167,7 @@ export const tenantValues = pgTable(
 );
 
 // ---------------------------------------------------------------------------
-// 16. audit_logs — generic, tenant-scoped, append-only audit trail.
+// 4. audit_logs — generic, tenant-scoped, append-only audit trail.
 //     Field-level rows: one row per changed field on 'update'; one row per
 //     action on 'create' | 'delete' | 'restore' | 'reclassify'.
 //     entity_type aligns with list_of_values.type vocabulary (UPPER_SNAKE_CASE).
@@ -263,9 +178,7 @@ export const auditLogs = pgTable(
   "audit_logs",
   {
     id: uuid().defaultRandom().primaryKey().notNull(),
-    tenantId: uuid("tenant_id")
-      .notNull()
-      .references(() => tenants.id),
+    tenantId: varchar("tenant_id", { length: TENANT_ID_LENGTH }).notNull(),
     entityType: varchar("entity_type", { length: 40 }).notNull(),
     entityId: uuid("entity_id").notNull(),
     action: varchar({ length: 40 }).notNull(),
@@ -287,9 +200,7 @@ export const auditLogs = pgTable(
     check(
       "audit_logs_action_check",
       sql`${t.action} IN (
-        'create', 'update', 'delete', 'restore', 'reclassify', 'promote_to_system',
-        'TENANT_SWITCH', 'MEMBERSHIP_INVITE', 'MEMBERSHIP_ACCEPT',
-        'MEMBERSHIP_REVOKE', 'MEMBERSHIP_ROLE_CHANGE'
+        'create', 'update', 'delete', 'restore', 'reclassify', 'promote_to_system'
       )`,
     ),
   ],

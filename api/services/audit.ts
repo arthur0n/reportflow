@@ -18,20 +18,16 @@ export type AuditAction =
   | "restore"
   | "reclassify"
   // Tenant LOV row → system row. Triggered by admin manual promote OR by an
-  // auto-promote when a second tenant tries to create the same code.
-  | "promote_to_system"
-  // Multi-tenancy lifecycle events (UPPER_SNAKE matches entity_type vocabulary).
-  | "TENANT_SWITCH"
-  | "MEMBERSHIP_INVITE"
-  | "MEMBERSHIP_ACCEPT"
-  | "MEMBERSHIP_REVOKE"
-  | "MEMBERSHIP_ROLE_CHANGE";
+  // auto-promote when a second org tries to create the same code.
+  | "promote_to_system";
 
 type Tx = Parameters<Parameters<typeof defaultDb.transaction>[0]>[0];
 type DbLike = typeof defaultDb | Tx;
 
 type AuditCtx = {
+  /** Clerk org_id. */
   tenantId: string;
+  /** Local users.id (uuid). */
   userId: string;
 };
 

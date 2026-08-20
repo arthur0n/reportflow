@@ -1,17 +1,28 @@
 // api/routes/webhook-routes.ts
 //
-// Auth provider webhook handlers. This is the ONLY place where rows in the
-// `tenants` and `users` tables are created — every other code path assumes
-// the rows already exist (see api/trpc/context.ts).
+// Auth-provider webhook handler. DORMANT during the foundation phase
+// (decisions §9, project_conventions §7): users are provisioned by hand, so
+// nothing depends on this route being wired up. It stays here, signature
+// verification and all, so enabling it later is a dashboard change plus an
+// SSM parameter — not a code archaeology exercise.
 //
-// The auth provider is an adapter. Types and names are provider-agnostic.
-// Signature verification uses Svix (the provider's webhook signing library).
+// Users are provisioned manually ONLY (project_conventions §7, decisions §2)
+// — scripts/make-admin.ts or plain SQL. The webhook MUST NOT create `users`
+// rows, ever, including on `organizationMembership.created`: that event is
+// acknowledged and logged only, never used to insert a row. Automatic
+// provisioning from a webhook payload would let anyone Clerk lets into an org
+// mint themselves a local row outside the manual review step.
+//
+// Revocation is the exception: removing access is always safe, so
+// `organizationMembership.deleted` still deletes the local row for that
+// (open_id, tenant_id), and `user.deleted` still removes the user everywhere.
+// `user.updated` still syncs profile fields on existing rows. None of these
+// paths ever INSERTs.
 
 import { Webhook } from "svix";
-import { eq, sql } from "drizzle-orm";
-import { adminDb } from "../db/admin-client";
-import { memberships, tenants, users } from "../../drizzle/schema";
-import { MEMBERSHIP_RANK } from "../../shared/constants/membership-roles";
+import { and, eq } from "drizzle-orm";
+import { db } from "../db/client";
+import { users } from "../../drizzle/schema";
 
 type LambdaResponse = {
   statusCode: number;
@@ -37,15 +48,11 @@ type ExternalUserEvent = {
     email_addresses?: Array<{ email_address: string }>;
     first_name?: string | null;
     last_name?: string | null;
-    deleted?: boolean;
-    organization_memberships?: Array<{
-      organization: { id: string };
-    }>;
   };
 };
 
 type ExternalOrgMembershipEvent = {
-  type: "organizationMembership.created";
+  type: "organizationMembership.created" | "organizationMembership.deleted";
   data: {
     id: string;
     organization: { id: string };
@@ -55,19 +62,10 @@ type ExternalOrgMembershipEvent = {
       last_name?: string | null;
       identifier?: string;
     };
-    role: string;
   };
 };
 
-type ExternalOrgEvent = {
-  type: "organization.created" | "organization.updated" | "organization.deleted";
-  data: {
-    id: string;
-    name: string;
-  };
-};
-
-type ExternalWebhookEvent = ExternalUserEvent | ExternalOrgMembershipEvent | ExternalOrgEvent;
+type ExternalWebhookEvent = ExternalUserEvent | ExternalOrgMembershipEvent;
 
 function fullName(
   first: string | null | undefined,
@@ -78,134 +76,62 @@ function fullName(
 }
 
 /**
- * Resolve our internal tenant id from the auth provider's org id, creating
- * the row defensively if the membership event arrives before
- * organization.created. Domain seed data (categories, payment methods) is
- * served at runtime via the combined-mode LOV read — no per-tenant clones.
+ * Users are provisioned manually — never from a webhook (project_conventions
+ * §7, decisions §2). Ack + log only; no row is written. If this membership
+ * should have local access, provision it by hand (scripts/make-admin.ts or
+ * plain SQL) after reviewing it.
  */
-async function findOrCreateTenant(externalOrgId: string, name?: string): Promise<string> {
-  const [existing] = await adminDb
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(eq(tenants.externalId, externalOrgId))
-    .limit(1);
-  if (existing) return existing.id;
-
-  const [created] = await adminDb
-    .insert(tenants)
-    .values({ externalId: externalOrgId, name: name ?? externalOrgId })
-    .onConflictDoNothing()
-    .returning({ id: tenants.id });
-  if (created) return created.id;
-
-  const [raced] = await adminDb
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(eq(tenants.externalId, externalOrgId))
-    .limit(1);
-  if (!raced) throw new Error(`[webhook] tenant creation failed for ${externalOrgId}`);
-  return raced.id;
+function handleOrgMembershipCreated(data: ExternalOrgMembershipEvent["data"]): void {
+  console.warn(
+    "[webhook] organizationMembership.created received — provisioning is manual, no row created",
+    { userId: data.public_user_data.user_id, tenantId: data.organization.id },
+  );
 }
 
-async function handleOrgCreated(data: ExternalOrgEvent["data"]): Promise<void> {
-  await findOrCreateTenant(data.id, data.name);
+/** Membership revoked in Clerk → the row for THAT org goes; others survive. */
+async function handleOrgMembershipDeleted(data: ExternalOrgMembershipEvent["data"]): Promise<void> {
+  await db
+    .delete(users)
+    .where(
+      and(
+        eq(users.openId, data.public_user_data.user_id),
+        eq(users.tenantId, data.organization.id),
+      ),
+    );
 }
 
-async function handleOrgDeleted(data: ExternalOrgEvent["data"]): Promise<void> {
-  await adminDb
-    .update(tenants)
-    .set({ deletedAt: new Date().toISOString() })
-    .where(eq(tenants.externalId, data.id));
-}
-
-async function handleOrgUpdated(data: ExternalOrgEvent["data"]): Promise<void> {
-  await adminDb
-    .update(tenants)
+/** Profile change — applies to every org row this Clerk user has. */
+async function handleUserUpdated(data: ExternalUserEvent["data"]): Promise<void> {
+  await db
+    .update(users)
     .set({
-      name: data.name,
+      email: data.email_addresses?.[0]?.email_address ?? null,
+      name: fullName(data.first_name, data.last_name),
       lastUpdAt: new Date().toISOString(),
     })
-    .where(eq(tenants.externalId, data.id));
+    .where(eq(users.openId, data.id));
 }
 
-async function handleUserCreated(data: ExternalUserEvent["data"]): Promise<void> {
-  const email = data.email_addresses?.[0]?.email_address ?? null;
-  const name = fullName(data.first_name, data.last_name);
-  await adminDb.insert(users).values({ externalId: data.id, email, name }).onConflictDoNothing();
-}
-
-async function handleOrgMembershipCreated(data: ExternalOrgMembershipEvent["data"]): Promise<void> {
-  const externalOrgId = data.organization.id;
-  const externalUserId = data.public_user_data.user_id;
-  const email = data.public_user_data.identifier ?? null;
-  const name = fullName(data.public_user_data.first_name, data.public_user_data.last_name);
-
-  const tenantId = await findOrCreateTenant(externalOrgId);
-
-  const [user] = await adminDb
-    .insert(users)
-    .values({ externalId: externalUserId, email, name })
-    .onConflictDoUpdate({
-      target: users.externalId,
-      set: { email, name },
-    })
-    .returning({ id: users.id, activeTenantId: users.activeTenantId });
-  if (!user) throw new Error(`[webhook] user upsert failed for ${externalUserId}`);
-
-  await adminDb
-    .insert(memberships)
-    .values({
-      userId: user.id,
-      tenantId,
-      role: MEMBERSHIP_RANK.ADMIN,
-      joinedAt: sql`now()`,
-      invitedBy: null,
-      createdBy: user.id,
-      lastUpdBy: user.id,
-    })
-    .onConflictDoNothing();
-
-  if (user.activeTenantId === null) {
-    await adminDb
-      .update(users)
-      .set({
-        activeTenantId: tenantId,
-        lastUpdAt: new Date().toISOString(),
-        lastUpdBy: user.id,
-      })
-      .where(eq(users.id, user.id));
-  }
-}
-
-async function handleUserUpdated(data: ExternalUserEvent["data"]): Promise<void> {
-  const email = data.email_addresses?.[0]?.email_address ?? null;
-  const name = fullName(data.first_name, data.last_name);
-  await adminDb
-    .update(users)
-    .set({ email, name, lastUpdAt: new Date().toISOString() })
-    .where(eq(users.externalId, data.id));
-}
-
+/** User deleted in Clerk → they lose access everywhere. */
 async function handleUserDeleted(data: ExternalUserEvent["data"]): Promise<void> {
-  await adminDb.delete(users).where(eq(users.externalId, data.id));
+  await db.delete(users).where(eq(users.openId, data.id));
 }
 
 async function dispatchWebhookEvent(evt: ExternalWebhookEvent): Promise<void> {
   switch (evt.type) {
-    case "organization.created":
-      return handleOrgCreated(evt.data);
-    case "organization.updated":
-      return handleOrgUpdated(evt.data);
-    case "organization.deleted":
-      return handleOrgDeleted(evt.data);
     case "organizationMembership.created":
-      return handleOrgMembershipCreated(evt.data);
-    case "user.created":
-      return handleUserCreated(evt.data);
+      handleOrgMembershipCreated(evt.data);
+      return;
+    case "organizationMembership.deleted":
+      return handleOrgMembershipDeleted(evt.data);
     case "user.updated":
       return handleUserUpdated(evt.data);
     case "user.deleted":
       return handleUserDeleted(evt.data);
+    case "user.created":
+      // Users are provisioned manually (project_conventions §7) — nothing to
+      // write here, on this event or on the membership event that follows it.
+      return;
   }
 }
 

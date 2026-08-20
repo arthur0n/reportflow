@@ -20,8 +20,7 @@ const TRIGRAM_THRESHOLD = 0.4;
 // Cap suggestions returned to keep the dialog scannable.
 const MAX_SUGGESTIONS = 5;
 
-export type SimilarityScope =
-  { kind: "tenant"; tenantId: string; tenantIndustry: string } | { kind: "admin-all" };
+export type SimilarityScope = { kind: "tenant"; tenantId: string } | { kind: "admin-all" };
 
 export type LovSimilarityMatch = {
   id: string;
@@ -35,8 +34,9 @@ export type LovSimilarityMatch = {
  * Find LOV rows similar to a candidate value within the given audience.
  * Returns up to MAX_SUGGESTIONS matches sorted by similarity desc.
  *
- * `scope.kind === "tenant"` filters to rows the tenant can see (combined-mode
- * audience). `admin-all` returns all rows across tenants — admin tooling only.
+ * `scope.kind === "tenant"` filters to rows the org can see (combined mode:
+ * its own rows + system rows). `admin-all` returns all rows across orgs —
+ * admin tooling only.
  *
  * Empty result means "no similar enough match" — caller proceeds with create.
  * pg_trgm extension must be enabled (see migration).
@@ -56,10 +56,7 @@ export async function findSimilarLovRows(args: {
   if (scope.kind === "tenant") {
     const tenantAudience = or(
       eq(listOfValues.tenantId, scope.tenantId),
-      and(
-        isNull(listOfValues.tenantId),
-        or(isNull(listOfValues.category), eq(listOfValues.category, scope.tenantIndustry)),
-      ),
+      isNull(listOfValues.tenantId),
     );
     if (tenantAudience !== undefined) conditions.push(tenantAudience);
   }

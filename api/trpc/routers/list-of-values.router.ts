@@ -1,8 +1,8 @@
 // api/trpc/routers/list-of-values.router.ts
 //
 // LOV accessor for UI dropdowns and the create-with-suggestions dialog.
-// `list` returns combined system + tenant rows for a given type, audience-
-// filtered by the tenant's industry. `suggest` runs the similarity engine
+// `list` returns combined system + tenant rows for a given type. `suggest`
+// runs the similarity engine
 // for the create dialog. `type` is REQUIRED on every query — type-less LOV
 // reads are a foot-gun (see CLAUDE.md NEVER list).
 
@@ -54,11 +54,7 @@ export const listOfValuesRouter = router({
         db,
         type: input.type,
         candidateValue: input.candidateValue,
-        scope: {
-          kind: "tenant",
-          tenantId: ctx.tenantId,
-          tenantIndustry: ctx.tenantIndustry,
-        },
+        scope: { kind: "tenant", tenantId: ctx.tenantId },
       });
     }),
 });

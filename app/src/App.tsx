@@ -2,13 +2,10 @@ import type { ReactElement } from "react";
 import { Route, Switch, Redirect } from "wouter";
 import { Protected } from "@/auth";
 import { SignInPage } from "./pages/SignInPage";
-import { SignUpPage } from "./pages/SignUpPage";
+import { AdminGate } from "./pages/AdminGate";
 import { DashboardPage } from "./pages/DashboardPage";
 import { TenantValuesKindPage } from "./pages/TenantValuesKindPage";
-import { AdminCustomersNewPage } from "./pages/AdminCustomersNewPage";
-import { AdminLovCandidatesPage } from "./pages/AdminLovCandidatesPage";
 import { AdminLovCatalogPage } from "./pages/AdminLovCatalogPage";
-import { SettingsTenantPage } from "./pages/SettingsTenantPage";
 
 export default function App(): ReactElement {
   return (
@@ -16,7 +13,11 @@ export default function App(): ReactElement {
       {/* Clerk's multi-step sign-in navigates to sub-paths like
           /sign-in/factor-two. The optional param keeps SignIn mounted. */}
       <Route path="/sign-in/:rest?" component={SignInPage} />
-      <Route path="/sign-up/:rest?" component={SignUpPage} />
+      {/* No self-serve sign-up: accounts are created by hand in Clerk and
+          matched with a local users row (project_conventions §7). */}
+      <Route path="/sign-up/:rest?">
+        <Redirect to="/sign-in" />
+      </Route>
       <Route path="/dashboard">
         <Protected>
           <DashboardPage />
@@ -32,22 +33,9 @@ export default function App(): ReactElement {
       </Route>
       <Route path="/admin/lov">
         <Protected>
-          <AdminLovCatalogPage />
-        </Protected>
-      </Route>
-      <Route path="/admin/lov-candidates">
-        <Protected>
-          <AdminLovCandidatesPage />
-        </Protected>
-      </Route>
-      <Route path="/admin/customers/new">
-        <Protected>
-          <AdminCustomersNewPage />
-        </Protected>
-      </Route>
-      <Route path="/settings/tenant">
-        <Protected>
-          <SettingsTenantPage />
+          <AdminGate>
+            <AdminLovCatalogPage />
+          </AdminGate>
         </Protected>
       </Route>
       <Route path="/">

@@ -11,26 +11,28 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { trpc } from "@/shared/lib/trpc";
+import { useMe } from "@/hooks/use-me";
 import { usePeriod } from "@/shared/period";
-import { TenantSwitcher } from "@/components/layout/TenantSwitcher";
-import { MEMBERSHIP_RANK } from "@shared/constants/membership-roles";
 
 type NavLeaf = { readonly href: string; readonly label: string };
+
+// Mirrors adminProcedure / AdminGate. Roles come from users.role, scoped to
+// the caller's Clerk org — never from a JWT claim.
+const ADMIN_ROLES: readonly string[] = ["admin", "platform_admin"];
 
 type NavItem =
   | {
       readonly kind: "link";
       readonly href: string;
       readonly label: string;
-      readonly requiredRank?: number;
+      readonly adminOnly?: boolean;
     }
   | {
       readonly kind: "group";
       readonly label: string;
       readonly matchPrefixes: readonly string[];
       readonly groups: readonly (readonly NavLeaf[])[];
-      readonly requiredRank?: number;
+      readonly adminOnly?: boolean;
     };
 
 const NAV_ITEMS: readonly NavItem[] = [
@@ -48,26 +50,18 @@ const NAV_ITEMS: readonly NavItem[] = [
       ],
     ],
   },
-  { kind: "link", href: "/settings/tenant", label: "Configurações" },
   {
     kind: "group",
     label: "Admin",
     matchPrefixes: ["/admin"],
-    requiredRank: MEMBERSHIP_RANK.REPORTFLOW,
-    groups: [
-      [
-        { href: "/admin/customers/new", label: "Novo cliente" },
-        { href: "/admin/lov", label: "Catálogo LOV" },
-        { href: "/admin/lov-candidates", label: "Candidatos LOV" },
-      ],
-    ],
+    adminOnly: true,
+    groups: [[{ href: "/admin/lov", label: "Catálogo LOV" }]],
   },
 ];
 
-function visibleNavItems(items: readonly NavItem[], role: number | null): readonly NavItem[] {
-  return role === null
-    ? items.filter((item) => item.requiredRank === undefined)
-    : items.filter((item) => item.requiredRank === undefined || role <= item.requiredRank);
+function visibleNavItems(items: readonly NavItem[], role: string | null): readonly NavItem[] {
+  const isAdmin = role !== null && ADMIN_ROLES.includes(role);
+  return items.filter((item) => item.adminOnly !== true || isAdmin);
 }
 
 function isActivePath(href: string, location: string): boolean {
@@ -85,7 +79,7 @@ const navLinkClass =
 export function AppLayout({ children }: { children: ReactNode }): ReactElement {
   const [location] = useLocation();
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const me = trpc.users.me.useQuery(undefined, { staleTime: 60_000 });
+  const me = useMe();
   const { period, setPeriod } = usePeriod();
   const navItems = visibleNavItems(NAV_ITEMS, me.data?.role ?? null);
 
@@ -194,16 +188,10 @@ export function AppLayout({ children }: { children: ReactNode }): ReactElement {
               </div>
               <div className="h-5 w-px bg-[color:var(--rule)] hidden sm:block" aria-hidden />
               <div className="hidden md:flex items-center gap-2 text-[length:var(--fs-body-sm)]">
-                {me.data?.activeTenantName != null && (
-                  <span className="rounded-[var(--radius-sm)] bg-[color:var(--paper-sink)] px-2 py-0.5 text-[color:var(--ink)]">
-                    {me.data.activeTenantName}
-                  </span>
-                )}
                 {me.data?.name != null && (
                   <span className="text-[color:var(--ink-mute)]">{me.data.name}</span>
                 )}
               </div>
-              <TenantSwitcher />
               <UserMenu />
               <button
                 type="button"

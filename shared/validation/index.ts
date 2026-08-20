@@ -12,5 +12,3 @@ export {
   UpdateTenantValueInput,
   TenantValuesListInput,
 } from "./tenant-value-schemas";
-
-export { CreateTenantInput, CreateCustomerInput } from "./onboarding-schemas";

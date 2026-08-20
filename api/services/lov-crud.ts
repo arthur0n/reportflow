@@ -8,7 +8,7 @@
 // and go through api/services/tenant-values-crud.ts instead.
 
 import { TRPCError } from "@trpc/server";
-import { and, eq, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, or, sql, type SQL } from "drizzle-orm";
 import { listOfValues } from "../../drizzle/schema";
 import type { db } from "../db/client";
 import { withSystemFields } from "../db/scope";
@@ -41,9 +41,6 @@ export type LovCreateInput = {
   // Skip the similarity preflight. Set when the user has seen suggestions
   // and chose to create a new row anyway.
   confirmedDespiteSuggestions?: boolean;
-  // Required for the similarity preflight (combined-mode audience filter).
-  // Omit only when confirmedDespiteSuggestions is true.
-  tenantIndustry?: string;
 };
 
 export type LovCreateOutcome =
@@ -103,18 +100,17 @@ async function findActiveByCode(
 }
 
 /**
- * Resolve an exact-code collision across all tenants before inserting a new
- * row. Drives the auto-promote rule: when a second tenant tries to create a
- * value another tenant already has, we promote that row to system rather
- * than letting two tenant-scoped rows exist for the same concept.
+ * Resolve an exact-code collision within the caller's visible namespace
+ * (own tenant rows + system rows). Other tenants' rows are invisible here:
+ * reading or mutating them from another tenant's request is a cross-tenant
+ * leak, so equal codes in different tenants simply coexist.
  *
  * Returns:
  *   { row, conflict: true }  — caller's own tenant already has this code
- *   { row, conflict: false } — system row exists OR another tenant's row was
- *                              auto-promoted in place; caller uses this row
+ *   { row, conflict: false } — system row exists; caller reuses it
  *   null                     — no collision; caller proceeds with insert
  */
-async function lovResolveAcrossTenants(
+async function lovResolveVisible(
   tx: DbLike,
   ctx: LovCtx,
   cfg: LovCrudConfig,
@@ -128,45 +124,23 @@ async function lovResolveAcrossTenants(
         eq(listOfValues.type, cfg.type),
         eq(listOfValues.code, code),
         isNull(listOfValues.deletedAt),
+        or(eq(listOfValues.tenantId, ctx.tenantId), isNull(listOfValues.tenantId)),
       ),
     )
     .limit(1);
 
   if (!existing) return null;
   if (existing.tenantId === ctx.tenantId) return { row: existing, conflict: true };
-  if (existing.tenantId === null) return { row: existing, conflict: false };
-
-  const setPayload = withSystemFields({ userId: ctx.userId }, "update", {
-    tenantId: null,
-    category: null,
-  });
-  const [promoted] = await tx
-    .update(listOfValues)
-    .set(setPayload)
-    .where(eq(listOfValues.id, existing.id))
-    .returning();
-  if (!promoted) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-
-  await writeAuditEntry({
-    ctx: { tenantId: existing.tenantId, userId: ctx.userId },
-    entityType: existing.type,
-    entityId: promoted.id,
-    action: "promote_to_system",
-    before: { tenantId: existing.tenantId, category: existing.category },
-    after: { tenantId: null, category: null },
-    tx,
-  });
-
-  return { row: promoted, conflict: false };
+  return { row: existing, conflict: false };
 }
 
 /**
  * Create a tenant-scoped LOV row.
  *
  * Order of resolution:
- *   1. Exact-code lookup across all tenants — same-tenant collision throws,
- *      another tenant's row auto-promotes to system, system row is returned
- *      as-is. In all three cases no new row is inserted.
+ *   1. Exact-code lookup in the visible namespace (own tenant + system) —
+ *      same-tenant collision throws, system row is returned as-is. In both
+ *      cases no new row is inserted.
  *   2. Fuzzy similarity preflight (within tenant audience) — surfaces
  *      near-matches like "IFOOD FEE" when "IFOOD" exists. Caller passes
  *      `confirmedDespiteSuggestions: true` to bypass.
@@ -187,7 +161,7 @@ export async function lovCreate(
 
   const code = deriveCode(input.name);
 
-  const resolved = await lovResolveAcrossTenants(tx, ctx, cfg, code);
+  const resolved = await lovResolveVisible(tx, ctx, cfg, code);
   if (resolved) {
     if (resolved.conflict) {
       throw new TRPCError({
@@ -199,17 +173,11 @@ export async function lovCreate(
   }
 
   if (input.confirmedDespiteSuggestions !== true) {
-    if (input.tenantIndustry === undefined || input.tenantIndustry.length === 0) {
-      throw new TRPCError({
-        code: "BAD_REQUEST",
-        message: "tenantIndustry is required for the similarity preflight.",
-      });
-    }
     const matches = await findSimilarLovRows({
       db: tx,
       type: cfg.type,
       candidateValue: input.name,
-      scope: { kind: "tenant", tenantId: ctx.tenantId, tenantIndustry: input.tenantIndustry },
+      scope: { kind: "tenant", tenantId: ctx.tenantId },
     });
     if (matches.length > 0) {
       return { kind: "suggestions", matches };
@@ -471,57 +439,6 @@ export async function lovById(
     )
     .limit(1);
   return row ?? null;
-}
-
-/**
- * Promote a tenant-created LOV row to a system row. Atomic UPDATE flipping
- * tenant_id to NULL and optionally setting `category` (the audience scope,
- * e.g. 'restaurant'). The row id stays stable so existing FKs (transactions.*)
- * keep resolving — no copy, no link, no relink.
- *
- * Admin-only callsite. Throws if the row is already system-scoped, deleted,
- * or not found. Audits as "promote_to_system" under the originating tenant.
- */
-export async function lovPromoteToSystem(
-  tx: DbLike,
-  args: { actorUserId: string; rowId: string; category: string | null },
-): Promise<LovRow> {
-  const [current] = await tx
-    .select()
-    .from(listOfValues)
-    .where(and(eq(listOfValues.id, args.rowId), isNull(listOfValues.deletedAt)))
-    .limit(1);
-  if (!current) throw new TRPCError({ code: "NOT_FOUND" });
-  if (current.tenantId === null) {
-    throw new TRPCError({
-      code: "BAD_REQUEST",
-      message: "Row is already system-scoped.",
-    });
-  }
-
-  const setPayload = withSystemFields({ userId: args.actorUserId }, "update", {
-    tenantId: null,
-    category: args.category,
-  });
-
-  const [updated] = await tx
-    .update(listOfValues)
-    .set(setPayload)
-    .where(eq(listOfValues.id, args.rowId))
-    .returning();
-  if (!updated) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-
-  await writeAuditEntry({
-    ctx: { tenantId: current.tenantId, userId: args.actorUserId },
-    entityType: current.type,
-    entityId: updated.id,
-    action: "promote_to_system",
-    before: { tenantId: current.tenantId, category: current.category },
-    after: { tenantId: null, category: args.category },
-    tx,
-  });
-
-  return updated;
 }
 
 /**

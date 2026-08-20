@@ -17,13 +17,8 @@
 import { and, eq, isNull, sql, type SQL } from "drizzle-orm";
 import type { PgTable } from "drizzle-orm/pg-core";
 import { db } from "./client";
-import {
-  listOfValues,
-  type memberships,
-  type tenants,
-  type tenantValues,
-} from "../../drizzle/schema";
-import { createScopedDb as createLegacyScope, withSystemFields } from "./scope";
+import { listOfValues, type tenantValues } from "../../drizzle/schema";
+import { assertTenantScoped, createScopedDb as createLegacyScope, withSystemFields } from "./scope";
 
 // ---------------------------------------------------------------------------
 // Type-level guards
@@ -45,12 +40,13 @@ export type CreateInput<T extends PgTable> = Omit<T["$inferInsert"], SystemField
 /** Same key set as CreateInput, but partial — patches don't set every field. */
 export type UpdateInput<T extends PgTable> = Partial<Omit<T["$inferInsert"], SystemFieldKey>>;
 
-// Tagged subset of soft-deletable tables. Mirrors TABLE_SCOPE entries with
-// softDelete:true — keeping this set alongside scope.ts buys type-level proof
-// that ctx.db.softDelete(...) is only callable on tables that actually have
-// deleted_at. A forgotten match is a compile error at the call site.
-export type SoftDeletableTable =
-  typeof tenants | typeof memberships | typeof tenantValues | typeof listOfValues;
+// Tagged subset of soft-deletable tables. Mirrors TABLE_SCOPE entries of
+// type 'tenant' with softDelete:true — keeping this set alongside scope.ts
+// buys type-level proof that ctx.db.softDelete(...) is only callable on
+// tables that actually have deleted_at AND are tenant-scoped. `list_of_values`
+// is deliberately absent: it is a 'lov' table, written only through the
+// LOV-CRUD core. A forgotten match is a compile error at the call site.
+export type SoftDeletableTable = typeof tenantValues;
 
 /** A drizzle transaction handle (the arg passed into db.transaction's callback). */
 export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -87,7 +83,7 @@ export type ScopedDb = {
     table: T,
     id: string,
   ): Promise<T["$inferSelect"] | undefined>;
-  /** LOV namespace — three modes, audience filter via tenantIndustry from closure. */
+  /** LOV namespace — three modes (system / tenant / combined). */
   lov: {
     list(query: LovListQuery): Promise<(typeof listOfValues.$inferSelect)[]>;
   };
@@ -133,17 +129,13 @@ function asTable(table: PgTable): PgTable {
 function buildLovNamespace(
   dbHandle: DbOrTx,
   scope: ReturnType<typeof createLegacyScope>,
-  tenantIndustry: string,
 ): ScopedDb["lov"] {
   return {
     async list(query) {
-      const mode = query.mode ?? "combined";
-      const conditions =
-        mode === "system"
-          ? scope.lovConditions({ type: query.type, mode: "system" })
-          : mode === "tenant"
-            ? scope.lovConditions({ type: query.type, mode: "tenant" })
-            : scope.lovConditions({ type: query.type, mode: "combined", tenantIndustry });
+      const conditions = scope.lovConditions({
+        type: query.type,
+        mode: query.mode ?? "combined",
+      });
       const rows = await dbHandle.select().from(listOfValues).where(conditions);
       return rows;
     },
@@ -153,7 +145,6 @@ function buildLovNamespace(
 type FactoryArgs = {
   userId: string;
   tenantId: string;
-  tenantIndustry: string;
   dbHandle: DbOrTx;
 };
 
@@ -198,6 +189,7 @@ function buildCrudVerbs(args: {
     },
 
     async create(table, input) {
+      assertTenantScoped(table, "create");
       const cols = tableColumns(table);
       const hasTenantCol = "tenantId" in cols;
       const payload = withSystemFields({ userId }, "create", input as Record<string, unknown>);
@@ -211,6 +203,7 @@ function buildCrudVerbs(args: {
     },
 
     async update(table, id, fields) {
+      assertTenantScoped(table, "update");
       const idCol = requireIdCol(table, "update");
       const stamped = withSystemFields({ userId }, "update", fields as Record<string, unknown>);
       const rows = await dbHandle
@@ -222,6 +215,7 @@ function buildCrudVerbs(args: {
     },
 
     async softDelete(table, id) {
+      assertTenantScoped(table, "softDelete");
       const idCol = requireIdCol(table, "softDelete");
       const stamped = withSystemFields({ userId }, "delete", {});
       const rows = await dbHandle
@@ -233,6 +227,7 @@ function buildCrudVerbs(args: {
     },
 
     async restore(table, id) {
+      assertTenantScoped(table, "restore");
       const idCol = requireIdCol(table, "restore");
       const stamped = withSystemFields({ userId }, "restore", {});
       // Restore must reach soft-deleted rows; bypass the deleted_at IS NULL filter.
@@ -247,7 +242,7 @@ function buildCrudVerbs(args: {
 }
 
 function createScopedDbInternal(args: FactoryArgs): ScopedDb {
-  const { userId, tenantId, tenantIndustry, dbHandle } = args;
+  const { userId, tenantId, dbHandle } = args;
   const scope = createLegacyScope({ tenantId });
   const scopeWithDeleted = createLegacyScope({ tenantId, includeDeleted: true });
   const inTx = dbHandle !== db;
@@ -255,7 +250,7 @@ function createScopedDbInternal(args: FactoryArgs): ScopedDb {
 
   const self: ScopedDb = {
     ...verbs,
-    lov: buildLovNamespace(dbHandle, scope, tenantIndustry),
+    lov: buildLovNamespace(dbHandle, scope),
     scope(table, options) {
       return options?.includeDeleted === true
         ? scopeWithDeleted.conditions(table)
@@ -263,7 +258,7 @@ function createScopedDbInternal(args: FactoryArgs): ScopedDb {
     },
     raw: dbHandle,
     withTx(tx) {
-      return createScopedDbInternal({ userId, tenantId, tenantIndustry, dbHandle: tx });
+      return createScopedDbInternal({ userId, tenantId, dbHandle: tx });
     },
     async transaction(fn) {
       // Already in a tx — flatten instead of opening a SAVEPOINT. Our
@@ -278,11 +273,7 @@ function createScopedDbInternal(args: FactoryArgs): ScopedDb {
   return self;
 }
 
-export function createScopedDb(args: {
-  userId: string;
-  tenantId: string;
-  tenantIndustry: string;
-}): ScopedDb {
+export function createScopedDb(args: { userId: string; tenantId: string }): ScopedDb {
   return createScopedDbInternal({ ...args, dbHandle: db });
 }
 

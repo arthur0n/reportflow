@@ -7,7 +7,6 @@
 export { AuthProvider } from "./provider";
 export { Protected } from "./protected";
 export { SignInWidget } from "./sign-in-widget";
-export { SignUpFlow } from "./sign-up-page";
 export { UserMenu } from "./user-menu";
 export { useSession } from "./use-session";
 export type { Session } from "./use-session";

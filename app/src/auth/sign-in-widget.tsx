@@ -7,7 +7,6 @@ export function SignInWidget(): ReactElement {
     <SignIn
       routing="path"
       path="/sign-in"
-      signUpUrl="/sign-up"
       forceRedirectUrl="/dashboard"
       appearance={authWidgetAppearance}
     />

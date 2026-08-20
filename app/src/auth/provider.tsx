@@ -12,9 +12,7 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
     <ClerkProvider
       publishableKey={PUBLISHABLE_KEY}
       signInUrl="/sign-in"
-      signUpUrl="/sign-up"
       afterSignInUrl="/dashboard"
-      afterSignUpUrl="/dashboard"
       afterSignOutUrl="/sign-in"
       localization={ptBR}
     >

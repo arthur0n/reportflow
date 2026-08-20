@@ -6,7 +6,7 @@
 // Lambda max=1 pool deadlock the bug uncovered.
 
 import { describe, it, expect, vi } from "vitest";
-import { memberships, tenants } from "../../drizzle/schema";
+import { auditLogs, tenantValues } from "../../drizzle/schema";
 import { createScopedDb, type Tx } from "./scoped-client";
 
 type FakeTx = ReturnType<typeof makeFakeTx>;
@@ -26,11 +26,7 @@ function makeFakeTx(rows: unknown[] = [{ id: "row-1" }]) {
 }
 
 function buildScope() {
-  return createScopedDb({
-    userId: "user-1",
-    tenantId: "tenant-1",
-    tenantIndustry: "restaurant",
-  });
+  return createScopedDb({ userId: "user-1", tenantId: "org_2abcTENANT" });
 }
 
 describe("ScopedDb.withTx", () => {
@@ -38,25 +34,25 @@ describe("ScopedDb.withTx", () => {
     const fakeTx: FakeTx = makeFakeTx();
     const txDb = buildScope().withTx(fakeTx as unknown as Tx);
 
-    const row = await txDb.byId(tenants, "id-1");
+    const row = await txDb.byId(auditLogs, "id-1");
 
     expect(fakeTx.select).toHaveBeenCalledOnce();
-    expect(fakeTx.from).toHaveBeenCalledWith(tenants);
+    expect(fakeTx.from).toHaveBeenCalledWith(auditLogs);
     expect(fakeTx.limit).toHaveBeenCalledWith(1);
     expect(row).toEqual({ id: "row-1" });
   });
 
   it("routes update through the provided tx handle and stamps system fields", async () => {
     const fakeTx: FakeTx = makeFakeTx([
-      { id: "m-1", role: 10, lastUpdAt: "now", lastUpdBy: "user-1" },
+      { id: "tv-1", value: "Toysmith", lastUpdAt: "now", lastUpdBy: "user-1" },
     ]);
     const txDb = buildScope().withTx(fakeTx as unknown as Tx);
 
-    await txDb.update(memberships, "m-1", { role: 10 });
+    await txDb.update(tenantValues, "tv-1", { value: "Toysmith" });
 
-    expect(fakeTx.update).toHaveBeenCalledWith(memberships);
+    expect(fakeTx.update).toHaveBeenCalledWith(tenantValues);
     const stamped = fakeTx.set.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
-    expect(stamped).toMatchObject({ role: 10, lastUpdBy: "user-1" });
+    expect(stamped).toMatchObject({ value: "Toysmith", lastUpdBy: "user-1" });
     expect(stamped?.["lastUpdAt"]).toEqual(expect.any(String));
   });
 

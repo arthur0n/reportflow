@@ -4,7 +4,7 @@ import { AuthShell } from "./authShell";
 
 export function SignInPage(): ReactElement {
   return (
-    <AuthShell title="Entrar" description="Use seu e-mail cadastrado. Um login, um negócio.">
+    <AuthShell title="Entrar" description="Use o e-mail cadastrado pela sua conta.">
       <SignInWidget />
     </AuthShell>
   );

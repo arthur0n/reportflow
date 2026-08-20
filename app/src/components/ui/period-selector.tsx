@@ -17,8 +17,7 @@ const MONTHS_PT = [
   "Dezembro",
 ] as const;
 
-// month is 1-indexed (1 = Janeiro), matching tenants.fiscal_year_start and
-// the global period context.
+// month is 1-indexed (1 = Janeiro), matching the global period context.
 type PeriodSelectorProps = {
   value?: { month: number; year: number };
   onChange?: (period: { month: number; year: number }) => void;

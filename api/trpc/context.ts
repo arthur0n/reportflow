@@ -2,55 +2,50 @@
 //
 // Single source of truth for how an incoming request becomes a tRPC context.
 //
-// Model (we own this; the auth provider is just an identity adapter):
-//   tenants     — orgs. tenants.external_id holds the auth provider's org id.
-//   users       — people. users.external_id holds the auth provider's user id.
-//                 users.active_tenant_id is the tenant the user is currently
-//                 acting in (Salesforce model).
-//   memberships — per-tenant grants. (user_id, tenant_id, role) plus lifecycle
-//                 (joined_at / expires_at / deleted_at).
+// Model (project_conventions §6/§7): the tenant IS the Clerk organization.
+// There is no local `tenants` table and no `memberships` table.
+//   tenant_id — the `org_id` claim on the verified JWT (varchar(64)).
+//   users     — one row per (open_id, tenant_id); `role` is OUR authorization
+//               layer, not Clerk's. Rows are provisioned manually
+//               (scripts/make-admin.ts or plain SQL) — no row, no access.
 //
 // Per-request resolution:
 //   1. Verify the JWT via authProvider (offline, no network call).
-//   2. Look up the local users row by external_id, LEFT JOIN active membership
-//      (joined, non-expired, non-revoked) for users.active_tenant_id, LEFT
-//      JOIN tenants for industry.
-//   3. ctx.userId is always set when authenticated.
-//      ctx.tenantId / tenantIndustry / role are set iff there's an active
-//      membership for the active_tenant_id.
-//      ctx.role is the active membership's numeric rank.
+//   2. Read `sub` (Clerk user id) and `org_id` (the tenant) from the payload.
+//   3. Look up the local users row by (open_id, tenant_id) — one indexed hit.
+//      No row → treat as unauthorized: authenticated in Clerk, not provisioned
+//      here yet.
 //
-// Routers consume ctx.db (built by protectedProcedure) — they do not read
-// ctx.tenantId directly. See api/db/scoped-client.ts.
+// Routers consume ctx.db (built by protectedProcedure) — they do not query
+// with the raw handle. See api/db/scoped-client.ts.
 
 import type { CreateAWSLambdaContextOptions } from "@trpc/server/adapters/aws-lambda";
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
-import { and, eq, gt, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db } from "../db/client";
-import { memberships, tenants, users } from "../../drizzle/schema";
+import { users } from "../../drizzle/schema";
 import { authProvider } from "../lib/auth-provider";
 
+/** Authorization roles. Stored on users.role; never read from the JWT. */
+export const ROLES = ["platform_admin", "admin", "member"] as const;
+export type Role = (typeof ROLES)[number];
+
+export function isRole(value: string): value is Role {
+  return (ROLES as readonly string[]).includes(value);
+}
+
 export type Context = {
-  // Provider's user id from the verified JWT. Set whenever the bearer token is
-  // valid, even when no local `users` row exists yet (e.g. signup race window
-  // before the user.created webhook lands). Onboarding's createTenant relies
-  // on this to bootstrap the row inline.
-  externalUserId: string | null;
-  userId: string | null;
+  /** Clerk org_id from the JWT. Null when the token is absent/invalid/org-less. */
   tenantId: string | null;
-  tenantIndustry: string | null;
-  role: number | null;
+  /** Local users.id (uuid). Null when there is no provisioned row. */
+  userId: string | null;
+  /** From users.role. Null whenever userId is null. */
+  role: Role | null;
 };
 
 type FlatHeaders = Record<string, string | undefined>;
 
-const EMPTY: Context = {
-  externalUserId: null,
-  userId: null,
-  tenantId: null,
-  tenantIndustry: null,
-  role: null,
-};
+const EMPTY: Context = { tenantId: null, userId: null, role: null };
 
 async function createContextFromHeaders(headers: FlatHeaders): Promise<Context> {
   const auth = headers["authorization"];
@@ -60,48 +55,39 @@ async function createContextFromHeaders(headers: FlatHeaders): Promise<Context> 
 
   try {
     const verified = await authProvider.verifyToken(auth.slice(7));
-    const externalUserId = verified.sub;
+    const openId = verified.sub;
+    const orgId = verified.orgId;
 
-    if (externalUserId.length === 0) {
+    if (openId.length === 0) {
       console.warn("[auth] JWT missing sub claim");
       return EMPTY;
     }
+    if (orgId === undefined || orgId.length === 0) {
+      // Signed in but not a member of any org — nothing to scope to.
+      // The frontend surfaces "peça um convite" for this case.
+      console.warn("[auth] JWT missing org_id claim");
+      return EMPTY;
+    }
 
+    // Composite identity (open_id, tenant_id): the same Clerk user can belong
+    // to more than one org with a different role in each.
     const [row] = await db
-      .select({
-        userId: users.id,
-        activeTenantId: users.activeTenantId,
-        role: memberships.role,
-        tenantIndustry: tenants.industry,
-      })
+      .select({ userId: users.id, role: users.role })
       .from(users)
-      .leftJoin(
-        memberships,
-        and(
-          eq(memberships.userId, users.id),
-          eq(memberships.tenantId, users.activeTenantId),
-          isNull(memberships.deletedAt),
-          isNotNull(memberships.joinedAt),
-          or(isNull(memberships.expiresAt), gt(memberships.expiresAt, sql`now()`)),
-        ),
-      )
-      .leftJoin(tenants, eq(tenants.id, users.activeTenantId))
-      .where(eq(users.externalId, externalUserId))
+      .where(and(eq(users.openId, openId), eq(users.tenantId, orgId)))
       .limit(1);
 
     if (!row) {
-      // Valid token but no local user row yet — happens during the signup
-      // race window before the user.created webhook arrives. Onboarding's
-      // createTenant uses externalUserId to bootstrap the row inline.
-      return { ...EMPTY, externalUserId };
+      // Authenticated in Clerk, but not provisioned in our DB. Unauthorized
+      // until someone INSERTs the row with the correct role.
+      console.warn("[auth] no local users row for this (open_id, org_id)");
+      return EMPTY;
     }
 
     return {
-      externalUserId,
+      tenantId: orgId,
       userId: row.userId,
-      tenantId: row.activeTenantId,
-      tenantIndustry: row.tenantIndustry,
-      role: row.role,
+      role: isRole(row.role) ? row.role : "member",
     };
   } catch (err) {
     console.error("[auth] JWT verification failed", err);

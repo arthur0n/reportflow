@@ -2,14 +2,21 @@
 //
 // Seeds system-owned data: list_of_values rows for baseline system types
 // (TENANT_VALUES, BANK_SLUG, CASH_BOX_TYPE, BUSINESS_UNIT_TYPE). Domain
-// seeds (DRE groups, transaction types, payment methods, imports, ...) were
-// removed with the scaffold's finance domain — reintroduce them alongside
-// the domain rebuild.
+// seeds were removed with the scaffold's finance domain — reintroduce them
+// alongside the domain rebuild.
 //
 // Every system seed runs through `seedSystemLov`, which is idempotent:
 // deletes rows whose code is outside the owned set, dedups duplicates of
 // owned codes (keeping the oldest), and upserts value/sort_order. Wrapped
 // in a single transaction for atomicity.
+//
+// There are no tenants/memberships rows to seed — a tenant is a Clerk org
+// (project_conventions §6) and `users` rows are provisioned by hand (§7).
+// Anything tenant-scoped therefore needs the org id passed in explicitly:
+//
+//   pnpm db:seed                       # system LOV only
+//   pnpm db:seed --tenant org_2abc...  # + tenant_values for that org
+//   SEED_TENANT_ID=org_2abc... pnpm db:seed
 //
 // Invoked by `pnpm db:seed`.
 
@@ -18,7 +25,8 @@ import { fileURLToPath } from "node:url";
 import { and, asc, eq, inArray, isNull, notInArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
-import { listOfValues } from "../drizzle/schema";
+import { listOfValues, tenantValues } from "../drizzle/schema";
+import { TENANT_VALUE_KINDS, type TenantValueKind } from "../shared/constants/tenant-value-kinds";
 
 type SeedTx = Parameters<Parameters<ReturnType<typeof drizzle>["transaction"]>[0]>[0];
 
@@ -64,6 +72,14 @@ export const LOV_SEED: Record<string, LovSeedEntry[]> = {
     { code: "outro", value: "Outro" },
   ],
 };
+
+// Per-org baseline rows for tenant_values, keyed by `kind`. Empty today: the
+// report domain has no universal starter records, and seeding a customer's
+// own data is the customer's job. Add entries here (not ad-hoc INSERTs) when
+// a kind gains a genuine baseline, and `--tenant <org_id>` will apply it.
+export const TENANT_VALUES_ROW_SEED: Partial<
+  Record<TenantValueKind, ReadonlyArray<{ code: string; value: string; sortOrder?: number }>>
+> = {};
 
 /**
  * Idempotent system-LOV seed. Owns rows scoped to (tenantId IS NULL, type,
@@ -153,7 +169,52 @@ async function seedSystemLov(
   console.warn(`[seed] ✓ ${label} (${rows.length} rows)`);
 }
 
+/**
+ * Idempotent per-org tenant_values seed. Insert-if-absent by
+ * (tenant_id, kind, code) — never deletes, because rows in this table after
+ * the first run belong to the customer, not to the seed.
+ */
+async function seedTenantValues(tx: SeedTx, tenantId: string): Promise<void> {
+  let total = 0;
+  for (const kind of TENANT_VALUE_KINDS) {
+    const rows = TENANT_VALUES_ROW_SEED[kind] ?? [];
+    for (const row of rows) {
+      const existing = await tx
+        .select({ id: tenantValues.id })
+        .from(tenantValues)
+        .where(
+          and(
+            eq(tenantValues.tenantId, tenantId),
+            eq(tenantValues.kind, kind),
+            eq(tenantValues.code, row.code),
+          ),
+        )
+        .limit(1);
+      if (existing.length > 0) continue;
+      await tx.insert(tenantValues).values({
+        tenantId,
+        kind,
+        code: row.code,
+        value: row.value,
+        language: "pt-BR",
+        sortOrder: row.sortOrder ?? 0,
+      });
+      total += 1;
+    }
+  }
+  console.warn(`[seed] ✓ tenant_values for ${tenantId} (${total} new rows)`);
+}
+
+/** `--tenant <org_id>` beats SEED_TENANT_ID; neither means "system LOV only". */
+function resolveTenantId(argv: readonly string[]): string | null {
+  const flagIndex = argv.indexOf("--tenant");
+  const fromFlag = flagIndex >= 0 ? argv[flagIndex + 1] : undefined;
+  const candidate = fromFlag ?? process.env["SEED_TENANT_ID"];
+  return candidate !== undefined && candidate.length > 0 ? candidate : null;
+}
+
 async function main(): Promise<void> {
+  const tenantId = resolveTenantId(process.argv.slice(2));
   const connectionString =
     process.env["DATABASE_URL"] ??
     `postgresql://${process.env["DB_USER"]}:${process.env["DB_PASSWORD"]}@${process.env["DB_HOST"]}/${process.env["DB_NAME"]}`;
@@ -174,6 +235,11 @@ async function main(): Promise<void> {
           type,
           entries.map((r, i) => ({ ...r, sortOrder: i })),
         );
+      }
+      if (tenantId !== null) {
+        await seedTenantValues(tx, tenantId);
+      } else {
+        console.warn("[seed] – tenant_values skipped (no --tenant / SEED_TENANT_ID)");
       }
     });
 

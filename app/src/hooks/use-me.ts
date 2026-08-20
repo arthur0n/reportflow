@@ -9,9 +9,9 @@ type UseMeResult = {
 };
 
 /**
- * Read the current user's identity from the local DB (tRPC), including the
- * active tenant. Backed by `users.me`. Cached briefly so the header can render
- * the tenant pill + user chip without re-fetching on every navigation.
+ * Read the current user's identity + role from the local DB (tRPC). Backed by
+ * `users.me`; the tenant is the Clerk org on the session. Cached briefly so
+ * the header and AdminGate can render without re-fetching on every navigation.
  */
 export function useMe(): UseMeResult {
   const q = trpc.users.me.useQuery(undefined, { staleTime: 60_000 });

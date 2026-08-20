@@ -22,17 +22,14 @@ import {
 import { cn } from "@/lib/utils";
 
 const ALL_TYPES = "__all__";
-type ScopeFilter = "all" | "system" | "tenant";
 
 export function AdminLovCatalogPage(): ReactElement {
   const [type, setType] = useState<string>(ALL_TYPES);
-  const [scope, setScope] = useState<ScopeFilter>("all");
   const [includeDeleted, setIncludeDeleted] = useState<boolean>(true);
 
   const typesQuery = trpc.adminLov.listAllTypes.useQuery();
   const rowsQuery = trpc.adminLov.listAll.useQuery({
     type: type === ALL_TYPES ? undefined : type,
-    scope,
     includeDeleted,
   });
 
@@ -60,9 +57,9 @@ export function AdminLovCatalogPage(): ReactElement {
       <div className="mx-auto max-w-[1400px] px-6 py-10">
         <h1 className="text-2xl font-semibold">Catálogo LOV (debug)</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Lista todas as linhas de <code>list_of_values</code> sem filtro de audiência (sistema +
-          tenants, todos os tipos). Ferramenta temporária de admin para diagnosticar o que está
-          gravado no banco.
+          Lista as linhas SISTEMA de <code>list_of_values</code> (tenant_id nulo, todos os tipos).
+          Ferramenta temporária de admin para diagnosticar o catálogo global — não mostra linhas de
+          nenhuma conta (decisions §2: admin de plataforma nunca lê linhas de outro tenant).
         </p>
 
         <div className="mt-6 flex flex-wrap items-end gap-4">
@@ -79,25 +76,6 @@ export function AdminLovCatalogPage(): ReactElement {
                     {t}
                   </SelectItem>
                 ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="scope">Escopo</Label>
-            <Select
-              value={scope}
-              onValueChange={(v) => {
-                setScope(v as ScopeFilter);
-              }}
-            >
-              <SelectTrigger id="scope" className="w-[220px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Sistema + clientes</SelectItem>
-                <SelectItem value="system">Só sistema</SelectItem>
-                <SelectItem value="tenant">Só clientes</SelectItem>
               </SelectContent>
             </Select>
           </div>
