@@ -8,6 +8,7 @@ import { usersRouter } from "./routers/users.router";
 import { adminLovRouter } from "./routers/admin-lov.router";
 import { listOfValuesRouter } from "./routers/list-of-values.router";
 import { tenantValuesRouter } from "./routers/tenant-values.router";
+import { documentsRouter } from "./routers/documents.router";
 
 export const appRouter = router({
   health: publicProcedure.query(() => ({ status: "ok" as const })),
@@ -16,6 +17,7 @@ export const appRouter = router({
   adminLov: adminLovRouter,
   listOfValues: listOfValuesRouter,
   tenantValues: tenantValuesRouter,
+  documents: documentsRouter,
 });
 
 export type AppRouter = typeof appRouter;

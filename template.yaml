@@ -79,6 +79,23 @@ Resources:
           CLERK_SECRET_KEY: !Sub "{{resolve:ssm:/reportflow/api/${Environment}/clerk-secret-key}}"
           APP_URL: !Sub "{{resolve:ssm:/reportflow/api/${Environment}/app-url}}"
           ENVIRONMENT: !Ref Environment
+          # Documents bucket (decisions §8, §12.5). One bucket, not per-env —
+          # see api/lib/storage.ts's own default.
+          DOCS_BUCKET: reportflow-docs-prod
+      # Literal bucket ARN string, NOT !Ref/!GetAtt: the bucket is not a
+      # resource in this template (created out of band, per the onboarding
+      # checklist), and aws_infrastructure.md:496 flags the same SAM
+      # circular-dependency trap for a bucket ARN referenced from this
+      # function's own role.
+      Policies:
+        - Statement:
+            - Sid: DocsBucketReadWrite
+              Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+                - s3:HeadObject
+              Resource: "arn:aws:s3:::reportflow-docs-prod/*"
       Events:
         ApiEvent:
           Type: HttpApi

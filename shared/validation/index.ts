@@ -12,3 +12,5 @@ export {
   UpdateTenantValueInput,
   TenantValuesListInput,
 } from "./tenant-value-schemas";
+
+export { ConfirmUploadInput } from "./document-schemas";
