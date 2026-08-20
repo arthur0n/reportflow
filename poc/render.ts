@@ -11,6 +11,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { renderTemplate, type AiSlots } from "./lib/handlebars.ts";
+import { auditSlots, harvestNumerals } from "./lib/numeral-guard.ts";
 import { formatCents, parseEuroToCents, sumCents } from "./lib/money.ts";
 import { buildContext, loadExtractions, type ReportContext } from "./lib/report-model.ts";
 import { REPO_ROOT } from "./lib/ai.ts";
@@ -82,6 +83,27 @@ function main(): void {
 
   console.log(`Render — ${String(loaded.faturas.length)} faturas, contrato ${loaded.contrato ? "presente" : "ausente"}`);
   console.log(`Prosa: ${source}\n`);
+
+  /* §12.12 numeral guard — AI prose may only contain numerals that already
+     exist in the deterministic universe (extractions + computed context).
+     An unknown numeral is treated as invented and blocks the render. */
+  if (existsSync(ANALYSIS_PATH)) {
+    /* Data fields + computed context ONLY — harvesting metadata (usage token
+       counts, ISO timestamps) would smuggle unrelated digits into the allowed
+       set and blunt the guard. */
+    const allowed = harvestNumerals({
+      ctx,
+      faturas: loaded.faturas.map((f) => f.data),
+      contrato: loaded.contrato?.data ?? null,
+      emissao: EMISSAO,
+    });
+    const violations = auditSlots(slots as Record<string, string>, allowed);
+    if (violations.length > 0) {
+      const detail = violations.map((v) => `slot "${v.slot}": numeral sem fonte "${v.token}"`).join("; ");
+      throw new Error(`GUARDA NUMÉRICA FALHOU — prosa contém números sem fonte determinística: ${detail}`);
+    }
+    console.log("  ✓ guarda numérica: todos os numerais da prosa têm fonte determinística");
+  }
 
   const fiel = render(TEMPLATE_FIEL, ctx, slots, "relatorio-fiel.html");
   console.log("  ✓ poc/out/relatorio-fiel.html");
