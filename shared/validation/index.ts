@@ -14,3 +14,44 @@ export {
 } from "./tenant-value-schemas";
 
 export { ConfirmUploadInput } from "./document-schemas";
+
+export {
+  FIELD_TYPES,
+  LEAF_FIELD_TYPES,
+  INPUT_MODES,
+  MONEY_RE,
+  DATE_RE,
+  isContainerType,
+  isFieldType,
+  isInputMode,
+  buildZodSchema,
+  buildFieldTree,
+  flattenFieldTree,
+  fieldsToPrompt,
+  fieldsToJsonSchema,
+} from "./field-spec";
+export type {
+  FieldType,
+  LeafFieldType,
+  InputMode,
+  FieldSpec,
+  FlatFieldRow,
+  FlatFieldSpec,
+} from "./field-spec";
+
+export {
+  FieldTypeZ,
+  LeafFieldTypeZ,
+  InputModeZ,
+  FieldNameZ,
+  FieldDescriptionZ,
+  ChildFieldInput,
+  FieldSpecInput,
+  FieldListInput,
+  DetectHintInput,
+  ProposeCalibrationInput,
+  PollProposalInput,
+  FreezeCalibrationInput,
+  GetTemplateInput,
+  CalibrationProposalZ,
+} from "./calibration-schemas";

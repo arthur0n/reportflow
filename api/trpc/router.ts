@@ -10,6 +10,7 @@ import { listOfValuesRouter } from "./routers/list-of-values.router";
 import { tenantValuesRouter } from "./routers/tenant-values.router";
 import { documentsRouter } from "./routers/documents.router";
 import { jobsRouter } from "./routers/jobs.router";
+import { calibrationRouter } from "./routers/calibration.router";
 
 export const appRouter = router({
   health: publicProcedure.query(() => ({ status: "ok" as const })),
@@ -20,6 +21,7 @@ export const appRouter = router({
   tenantValues: tenantValuesRouter,
   documents: documentsRouter,
   jobs: jobsRouter,
+  calibration: calibrationRouter,
 });
 
 export type AppRouter = typeof appRouter;

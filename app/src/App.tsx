@@ -5,6 +5,7 @@ import { SignInPage } from "./pages/SignInPage";
 import { AdminGate } from "./pages/AdminGate";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DocumentsPage } from "./pages/DocumentsPage";
+import { CalibratePage } from "./pages/CalibratePage";
 import { TenantValuesKindPage } from "./pages/TenantValuesKindPage";
 import { AdminLovCatalogPage } from "./pages/AdminLovCatalogPage";
 
@@ -27,6 +28,11 @@ export default function App(): ReactElement {
       <Route path="/documents">
         <Protected>
           <DocumentsPage />
+        </Protected>
+      </Route>
+      <Route path="/calibrate">
+        <Protected>
+          <CalibratePage />
         </Protected>
       </Route>
       <Route path="/parameters/tenant-values/:slug">

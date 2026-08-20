@@ -38,6 +38,7 @@ type NavItem =
 const NAV_ITEMS: readonly NavItem[] = [
   { kind: "link", href: "/dashboard", label: "Painel" },
   { kind: "link", href: "/documents", label: "Documentos" },
+  { kind: "link", href: "/calibrate", label: "Calibrar" },
   {
     kind: "group",
     label: "Parâmetros",
