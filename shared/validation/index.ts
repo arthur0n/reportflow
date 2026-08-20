@@ -77,3 +77,51 @@ export {
   GetTemplateInput,
   CalibrationProposalZ,
 } from "./calibration-schemas";
+
+export {
+  IDENTIFIER_RE,
+  RESERVED_ROLE_KEYS,
+  RoleKeyZ,
+  CardinalityZ,
+  RoleInputZ,
+  RoleDeclarationZ,
+  RoleDeclarationsZ,
+  SlotInputZ,
+  SlotDeclarationZ,
+  SlotDeclarationsZ,
+  TEMPLATE_HTML_MAX,
+  CreateOutboundTemplateInput,
+  OutboundTemplateIdInput,
+  SaveTemplateVersionInput,
+  PreviewTemplateInput,
+} from "./outbound-schemas";
+export type {
+  Cardinality,
+  RoleInputT,
+  RoleDeclarationT,
+  SlotInputT,
+  SlotDeclarationT,
+  CreateOutboundTemplateInputT,
+  OutboundTemplateIdInputT,
+  SaveTemplateVersionInputT,
+  PreviewTemplateInputT,
+} from "./outbound-schemas";
+
+export {
+  CreateReportInput,
+  ReportIdInput,
+  AttachDocumentInput,
+  DetachDocumentInput,
+  RoleOptionsInput,
+  UpdateSlotInput,
+  UpgradeReportVersionInput,
+} from "./report-schemas";
+export type {
+  CreateReportInputT,
+  ReportIdInputT,
+  AttachDocumentInputT,
+  DetachDocumentInputT,
+  RoleOptionsInputT,
+  UpdateSlotInputT,
+  UpgradeReportVersionInputT,
+} from "./report-schemas";

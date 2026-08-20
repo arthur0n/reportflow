@@ -26,6 +26,13 @@ vi.mock("../../lib/storage", () => ({
   createPresignedUploadUrl: storage.createPresignedUploadUrl,
   headDocument: storage.headDocument,
   getDocumentBytes: storage.getDocumentBytes,
+  // Added when reports.router.ts joined the root router: a whole-module mock
+  // must export everything the module graph imports, and the freeze path
+  // (decisions §5.1) pulls these three from api/lib/storage.ts.
+  frozenReportKey: vi.fn(),
+  putFrozenReport: vi.fn(),
+  getFrozenReport: vi.fn(),
+  deleteFrozenReport: vi.fn(),
   MAX_UPLOAD_BYTES: 26_214_400,
   REQUIRED_CONTENT_TYPE: "application/pdf",
 }));

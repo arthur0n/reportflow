@@ -26,7 +26,16 @@ vi.mock("../../services/extraction-service", () => service);
 const relay = vi.hoisted(() => ({ enqueueRelayJob: vi.fn() }));
 vi.mock("../../lib/relay", () => relay);
 
-const storage = vi.hoisted(() => ({ getDocumentBytes: vi.fn() }));
+const storage = vi.hoisted(() => ({
+  getDocumentBytes: vi.fn(),
+  // Added when reports.router.ts joined the root router: a whole-module mock
+  // must export everything the module graph imports, and the freeze path
+  // (decisions §5.1) pulls these three from api/lib/storage.ts.
+  frozenReportKey: vi.fn(),
+  putFrozenReport: vi.fn(),
+  getFrozenReport: vi.fn(),
+  deleteFrozenReport: vi.fn(),
+}));
 vi.mock("../../lib/storage", () => storage);
 
 const { appRouter } = await import("../router");

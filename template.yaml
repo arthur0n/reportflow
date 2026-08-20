@@ -127,6 +127,31 @@ Resources:
               Effect: Allow
               Action: s3:GetObject
               Resource: "arn:aws:s3:::reportflow-docs-prod/results/*"
+            # Published reports (§5.1). Its OWN prefix, not `org_*`: that
+            # namespace carries PutObject because presigned POSTs are signed
+            # with this role, so a browser holding an upload form for it could
+            # otherwise land on a frozen archive.
+            #
+            # The key is server-minted PER PUBLISH ATTEMPT —
+            # `frozen/{tenantId}/{reportId}/{uuid}.html` (api/lib/storage.ts),
+            # never client-supplied. One key per report was a race: two
+            # concurrent publishers wrote the same object, and the one that
+            # LOST the frozen_at compare-and-set could still overwrite the
+            # winner's archive afterwards.
+            #
+            # Read is needed because a published report is printed from what
+            # was ARCHIVED, not from a re-render (the whole point of freezing
+            # it). Delete is needed because the losing publisher removes its
+            # own orphan; the prefix is unchanged, so this is a third verb on
+            # the same resource, not a wider one. Literal ARN for the same
+            # reason as every statement above.
+            - Sid: FrozenReportsReadWrite
+              Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+                - s3:DeleteObject
+              Resource: "arn:aws:s3:::reportflow-docs-prod/frozen/*"
       Events:
         ApiEvent:
           Type: HttpApi

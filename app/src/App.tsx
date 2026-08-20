@@ -6,6 +6,8 @@ import { AdminGate } from "./pages/AdminGate";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DocumentsPage } from "./pages/DocumentsPage";
 import { CalibratePage } from "./pages/CalibratePage";
+import { TemplatesPage } from "./pages/TemplatesPage";
+import { ReportsPage } from "./pages/ReportsPage";
 import { RevisarPage } from "./features/extraction/RevisarPage";
 import { TenantValuesKindPage } from "./pages/TenantValuesKindPage";
 import { AdminLovCatalogPage } from "./pages/AdminLovCatalogPage";
@@ -43,6 +45,20 @@ export default function App(): ReactElement {
       <Route path="/calibrate">
         <Protected>
           <CalibratePage />
+        </Protected>
+      </Route>
+      {/* The OUTPUT axis (§3.2): authoring a template, and the reports that
+          pin one of its versions. Two screens because the two things have
+          different lifetimes — a template version is immutable and shared,
+          a report is a draft until it is frozen (§5.1/§5.3). */}
+      <Route path="/templates">
+        <Protected>
+          <TemplatesPage />
+        </Protected>
+      </Route>
+      <Route path="/reports">
+        <Protected>
+          <ReportsPage />
         </Protected>
       </Route>
       <Route path="/parameters/tenant-values/:slug">

@@ -12,6 +12,8 @@ import { documentsRouter } from "./routers/documents.router";
 import { jobsRouter } from "./routers/jobs.router";
 import { calibrationRouter } from "./routers/calibration.router";
 import { extractionsRouter } from "./routers/extractions.router";
+import { outboundRouter } from "./routers/outbound.router";
+import { reportsRouter } from "./routers/reports.router";
 
 export const appRouter = router({
   health: publicProcedure.query(() => ({ status: "ok" as const })),
@@ -24,6 +26,8 @@ export const appRouter = router({
   jobs: jobsRouter,
   calibration: calibrationRouter,
   extractions: extractionsRouter,
+  outbound: outboundRouter,
+  reports: reportsRouter,
 });
 
 export type AppRouter = typeof appRouter;

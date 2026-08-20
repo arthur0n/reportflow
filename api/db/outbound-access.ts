@@ -16,10 +16,10 @@
 // carries no scoping information to check against — visibility can only be
 // determined by looking at its parent template.
 
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { db } from "./client";
 import { outboundTemplates, outboundTemplateVersions } from "../../drizzle/schema";
-import { createScopedDb } from "./scope";
+import { createScopedDb, withSystemFields } from "./scope";
 import type { Tx } from "./scoped-client";
 
 /** Anything that exposes select — either the pool or a tx. */
@@ -148,4 +148,145 @@ export async function assertVersionVisible(
         `template outside tenant "${tenantId}" — refusing to pin it.`,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// WRITES.
+//
+// They live here for the same reason the reads do: this file's header claims
+// to be the SOLE sanctioned accessor for these two tables, and a claim with an
+// exception is not a claim. Both tables are registered `lov`, so the scoped
+// write helpers (`assertTenantScoped`) refuse them by design — the tenant
+// column is written explicitly below instead, from the caller's own ctx.
+//
+// Nothing here UPDATEs `outbound_template_versions`. There is no update path
+// anywhere in the codebase, and that is the §5.3 guarantee: `content_json`
+// references slot slugs, so editing a live version could delete a slot out
+// from under a draft that has human-written prose in it. The immutability is
+// held by ABSENCE of a writer, not by a check something could forget to run.
+// ---------------------------------------------------------------------------
+
+export interface OutboundWriteCtx {
+  readonly tenantId: string;
+  readonly userId: string;
+}
+
+/** Creates a TENANT template. A system template (`tenant_id IS NULL`) is a
+ * platform-admin artifact and is deliberately not creatable from here — there
+ * is no tenant-facing procedure that should be able to mint one. */
+export async function insertOutboundTemplate(
+  dbHandle: DbLike,
+  ctx: OutboundWriteCtx,
+  values: { readonly name: string; readonly description: string | null },
+): Promise<OutboundTemplateRow> {
+  const rows = await dbHandle
+    .insert(outboundTemplates)
+    .values(
+      withSystemFields({ userId: ctx.userId }, "create", {
+        tenantId: ctx.tenantId,
+        name: values.name,
+        description: values.description,
+      }),
+    )
+    .returning();
+  const row = rows[0];
+  if (row === undefined) {
+    throw new Error("insertOutboundTemplate: outbound_templates insert returned no row");
+  }
+  return row;
+}
+
+/**
+ * Writes version N+1 for a template the caller can already see.
+ *
+ * `nextVersion` is read INSIDE the caller's transaction and the write is
+ * guarded by `outbound_template_versions_template_version_idx` — read-then-
+ * insert is check-then-act, so two authors saving the same template in the
+ * same second both read N and one of them hits the unique index. That is the
+ * intended outcome: a duplicate version is refused by Postgres rather than
+ * silently overwriting, and the loser retries with a fresh read.
+ */
+export async function insertTemplateVersion(
+  dbHandle: DbLike,
+  ctx: OutboundWriteCtx,
+  values: {
+    readonly outboundTemplateId: string;
+    readonly html: string;
+    readonly slotsJson: unknown;
+    readonly inputsJson: unknown;
+  },
+): Promise<OutboundTemplateVersionRow> {
+  const [latest] = await dbHandle
+    .select({ version: outboundTemplateVersions.version })
+    .from(outboundTemplateVersions)
+    .where(eq(outboundTemplateVersions.outboundTemplateId, values.outboundTemplateId))
+    .orderBy(desc(outboundTemplateVersions.version))
+    .limit(1);
+
+  const rows = await dbHandle
+    .insert(outboundTemplateVersions)
+    .values(
+      withSystemFields({ userId: ctx.userId }, "create", {
+        outboundTemplateId: values.outboundTemplateId,
+        version: (latest?.version ?? 0) + 1,
+        slotsJson: values.slotsJson,
+        inputsJson: values.inputsJson,
+        html: values.html,
+      }),
+    )
+    .returning();
+  const row = rows[0];
+  if (row === undefined) {
+    throw new Error("insertTemplateVersion: outbound_template_versions insert returned no row");
+  }
+  // Touch the parent so the list can order by "last edited" without joining
+  // every version. The PARENT is mutable; the version is not.
+  await dbHandle
+    .update(outboundTemplates)
+    .set({ lastUpdAt: new Date().toISOString(), lastUpdBy: ctx.userId })
+    .where(eq(outboundTemplates.id, values.outboundTemplateId));
+  return row;
+}
+
+export interface LatestVersion {
+  readonly templateId: string;
+  readonly versionId: string;
+  readonly version: number;
+}
+
+/** The highest version of each VISIBLE template. Powers the template list and
+ * the "v3" the report-creation screen pins.
+ *
+ * Ordered read + a fold, rather than DISTINCT ON: the visible set is a
+ * tenant's own templates plus the system ones — tens of rows, not thousands —
+ * and the fold is the same answer in code every reader of this file can check
+ * without knowing Postgres's DISTINCT ON ordering rule. */
+export async function listLatestVersions(
+  dbHandle: DbLike,
+  tenantId: string,
+): Promise<LatestVersion[]> {
+  const scope = createScopedDb({ tenantId });
+  const templateVisible = scope.lovConditions(outboundTemplates, "combined");
+  const rows = await dbHandle
+    .select({
+      templateId: outboundTemplateVersions.outboundTemplateId,
+      versionId: outboundTemplateVersions.id,
+      version: outboundTemplateVersions.version,
+    })
+    .from(outboundTemplateVersions)
+    .innerJoin(
+      outboundTemplates,
+      eq(outboundTemplateVersions.outboundTemplateId, outboundTemplates.id),
+    )
+    .where(templateVisible)
+    .orderBy(desc(outboundTemplateVersions.version));
+
+  const latest = new Map<string, LatestVersion>();
+  for (const row of rows) {
+    const seen = latest.get(row.templateId);
+    if (seen === undefined || row.version > seen.version) {
+      latest.set(row.templateId, row);
+    }
+  }
+  return [...latest.values()];
 }

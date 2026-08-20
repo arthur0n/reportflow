@@ -24,7 +24,13 @@
 // the checks below re-affirming it.
 
 import { randomUUID } from "node:crypto";
-import { S3Client, GetObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
+import {
+  S3Client,
+  GetObjectCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  DeleteObjectCommand,
+} from "@aws-sdk/client-s3";
 import { createPresignedPost } from "@aws-sdk/s3-presigned-post";
 import { assertOwnedKey, assertPlainKey } from "./object-keys";
 
@@ -178,6 +184,100 @@ export async function getDocumentBytes(key: string): Promise<Buffer | null> {
     if (err instanceof DocumentTooLargeError) {
       throw err;
     }
+    const name = typeof err === "object" && err !== null ? (err as { name?: unknown }).name : "";
+    if (name === "NotFound" || name === "NoSuchKey") {
+      return null;
+    }
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Frozen report HTML (decisions §5.1)
+//
+// "On publish, the rendered HTML is frozen to S3 and the key stored. What was
+// sent is what is archived; editing the shell later cannot retroactively
+// change a document someone's customer already received."
+//
+// A FOURTH PREFIX, `frozen/`, and not the tenant's `org_*` document namespace:
+// `org_*` is granted `s3:PutObject` because a PRESIGNED POST is signed with
+// this role's credentials, so a browser holding a form for that prefix is
+// authorized against the same grant. A published, immutable artifact must not
+// live where a presigned upload can land on it.
+//
+// THE KEY CARRIES A PER-ATTEMPT UUID, and that is a correctness fix rather
+// than tidiness (codex review). It used to be `frozen/{tenant}/{report}.html`
+// — derived purely from the two ids, so EVERY concurrent publisher of one
+// report computed the SAME key. The compare-and-set on `frozen_at` correctly
+// picks one winner, but the loser has already PUT, and it may PUT *after* the
+// winner's PUT and CAS: same key, so the loser silently overwrites the
+// archive the winner's row now points at. Ordering the writes cannot fix it;
+// only not sharing the key can. Each attempt therefore writes its own object
+// and the CAS stamps THAT key, so `frozen_html_s3_key` names the exact bytes
+// the winner produced and nothing can reach them. The loser deletes its own
+// orphan (`deleteFrozenReport`). `reports_frozen_html_s3_key_idx` still holds:
+// one row, one key.
+// ---------------------------------------------------------------------------
+
+/**
+ * `frozen/{tenantId}/{reportId}/{attemptId}.html` — server-minted, never
+ * client-supplied, and a FRESH key on every call. Two publishers of the same
+ * report can therefore never write the same object (see above).
+ */
+export function frozenReportKey(tenantId: string, reportId: string): string {
+  return `frozen/${tenantId}/${reportId}/${randomUUID()}.html`;
+}
+
+/**
+ * Writes the frozen HTML. Called BEFORE the `frozen_at` stamp
+ * (api/services/report-publish.ts): a row with no object is a report the UI
+ * calls published and cannot show, which is unrecoverable; an object with no
+ * row is an orphan, which the publisher deletes on a lost CAS and which
+ * nothing points at either way.
+ */
+export async function putFrozenReport(key: string, html: string): Promise<void> {
+  assertPlainKey(key, "key");
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: docsBucket(),
+      Key: key,
+      Body: html,
+      ContentType: "text/html; charset=utf-8",
+      // Nothing in this system serves the object to a browser directly; it is
+      // read back through the API. Marking it explicitly anyway so a future
+      // presigned GET cannot render attacker-authored prose as same-origin
+      // HTML by accident.
+      ContentDisposition: "attachment",
+    }),
+  );
+}
+
+/**
+ * Deletes one attempt's object. Called ONLY by the publisher that lost the
+ * compare-and-set, on the key IT minted — never on a key read from a row, so
+ * it cannot delete a live archive even if the caller is confused.
+ *
+ * Best-effort by design: the caller swallows failures. A leftover orphan is
+ * unreferenced bytes; a publish that failed because a cleanup failed would be
+ * a worse outcome for the same fact.
+ */
+export async function deleteFrozenReport(key: string): Promise<void> {
+  assertPlainKey(key, "key");
+  await s3.send(new DeleteObjectCommand({ Bucket: docsBucket(), Key: key }));
+}
+
+/** Reads a frozen report back. `null` when the object is gone — the row still
+ * says published, and the screen says so, rather than throwing at a user who
+ * did nothing wrong. */
+export async function getFrozenReport(key: string): Promise<string | null> {
+  assertPlainKey(key, "key");
+  try {
+    const res = await s3.send(new GetObjectCommand({ Bucket: docsBucket(), Key: key }));
+    if (res.Body === undefined) {
+      return null;
+    }
+    return await res.Body.transformToString("utf-8");
+  } catch (err) {
     const name = typeof err === "object" && err !== null ? (err as { name?: unknown }).name : "";
     if (name === "NotFound" || name === "NoSuchKey") {
       return null;
