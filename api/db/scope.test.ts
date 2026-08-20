@@ -14,10 +14,18 @@
 //      explicit dedicated queries, never the scoped write helpers).
 
 import { describe, it, expect } from "vitest";
-import { PgDialect, pgTable, uuid, varchar, timestamp } from "drizzle-orm/pg-core";
-import type { SQL } from "drizzle-orm";
+import { PgDialect, PgTable, pgTable, uuid, varchar, timestamp } from "drizzle-orm/pg-core";
+import { getTableName, is, type SQL } from "drizzle-orm";
 import { createScopedDb, assertTenantScoped, TABLE_SCOPE } from "./scope";
-import { auditLogs, listOfValues, tenantValues, users } from "../../drizzle/schema";
+import * as schema from "../../drizzle/schema";
+import {
+  auditLogs,
+  creditConfig,
+  listOfValues,
+  outboundTemplates,
+  tenantValues,
+  users,
+} from "../../drizzle/schema";
 
 const TENANT = "org_2abcTENANT";
 const OTHER_TENANT = "org_2xyzOTHER";
@@ -38,11 +46,35 @@ function sqlText(fragment: SQL): string {
   return `${sql} :: ${JSON.stringify(params)}`;
 }
 
+/**
+ * Every pgTable exported from drizzle/schema.ts, by physical table name.
+ * Derived from the module — NOT a hand-maintained list — so adding a table
+ * without its TABLE_SCOPE entry fails here instead of at runtime in prod.
+ */
+const SCHEMA_TABLE_NAMES: string[] = Object.values(schema).flatMap((value) =>
+  is(value, PgTable) ? [getTableName(value)] : [],
+);
+
 describe("TABLE_SCOPE registry", () => {
+  it("finds the schema tables it is meant to be checking", () => {
+    // Guards the guard: if the reflection above ever returns nothing, the
+    // completeness test below would pass vacuously.
+    expect(SCHEMA_TABLE_NAMES.length).toBeGreaterThan(4);
+    expect(SCHEMA_TABLE_NAMES).toContain("users");
+  });
+
   it("registers every table in drizzle/schema.ts", () => {
-    expect(Object.keys(TABLE_SCOPE).sort()).toEqual(
-      ["audit_logs", "list_of_values", "tenant_values", "users"].sort(),
-    );
+    const unregistered = SCHEMA_TABLE_NAMES.filter(
+      (name) => TABLE_SCOPE[name] === undefined,
+    ).sort();
+    expect(unregistered).toEqual([]);
+  });
+
+  it("has no entry for a table that no longer exists in the schema", () => {
+    const orphaned = Object.keys(TABLE_SCOPE)
+      .filter((name) => !SCHEMA_TABLE_NAMES.includes(name))
+      .sort();
+    expect(orphaned).toEqual([]);
   });
 });
 
@@ -183,6 +215,65 @@ describe("lovConditions()", () => {
     );
     expect(() => scope.lovConditions({ type: "CATEGORY", mode: "combined" })).toThrowError(
       /tenantId required/,
+    );
+  });
+});
+
+describe("lovConditions(table, mode) — generalized form", () => {
+  it("'system' matches only tenant_id IS NULL rows, for a table other than list_of_values", () => {
+    const scope = createScopedDb({ tenantId: TENANT });
+    const rendered = sqlText(scope.lovConditions(outboundTemplates, "system"));
+    expect(rendered).toContain("tenant_id");
+    expect(rendered).toContain("is null");
+    expect(rendered).not.toContain(TENANT);
+  });
+
+  it("'tenant' matches only this org's rows", () => {
+    const scope = createScopedDb({ tenantId: TENANT });
+    const rendered = sqlText(scope.lovConditions(outboundTemplates, "tenant"));
+    expect(rendered).toContain(TENANT);
+    expect(rendered).not.toContain(OTHER_TENANT);
+  });
+
+  it("'combined' matches this org's rows OR system rows", () => {
+    const scope = createScopedDb({ tenantId: TENANT });
+    const rendered = sqlText(scope.lovConditions(outboundTemplates, "combined"));
+    expect(rendered).toContain(TENANT);
+    expect(rendered).toContain("or");
+    expect(rendered).toContain("is null");
+  });
+
+  it("defaults to combined mode when mode is omitted", () => {
+    const scope = createScopedDb({ tenantId: TENANT });
+    expect(sqlText(scope.lovConditions(outboundTemplates))).toEqual(
+      sqlText(scope.lovConditions(outboundTemplates, "combined")),
+    );
+  });
+
+  it("applies the soft-delete filter (outbound_templates has deleted_at)", () => {
+    const scope = createScopedDb({ tenantId: TENANT });
+    expect(sqlText(scope.lovConditions(outboundTemplates, "combined"))).toContain("deleted_at");
+  });
+
+  it("refuses tenant/combined reads without a tenant", () => {
+    const scope = createScopedDb();
+    expect(() => scope.lovConditions(outboundTemplates, "tenant")).toThrowError(
+      /tenantId required/,
+    );
+    expect(() => scope.lovConditions(outboundTemplates, "combined")).toThrowError(
+      /tenantId required/,
+    );
+  });
+
+  it("'system' works without a tenant at all", () => {
+    const scope = createScopedDb();
+    expect(() => scope.lovConditions(outboundTemplates, "system")).not.toThrow();
+  });
+
+  it("throws for a table with no tenantId column at all (credit_config)", () => {
+    const scope = createScopedDb({ tenantId: TENANT });
+    expect(() => scope.lovConditions(creditConfig, "system")).toThrowError(
+      /has no tenantId column/,
     );
   });
 });

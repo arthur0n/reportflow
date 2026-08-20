@@ -14,8 +14,8 @@
 // cross-tenant leak. `lov` tables throw too — they are reachable only through
 // lovConditions(), which is the whole point of the separate scope type.
 
-import { eq, and, isNull, or, sql, type SQL } from "drizzle-orm";
-import type { PgTable } from "drizzle-orm/pg-core";
+import { eq, and, isNull, is, or, sql, type SQL } from "drizzle-orm";
+import { PgTable } from "drizzle-orm/pg-core";
 import { listOfValues } from "../../drizzle/schema";
 
 type ScopeType =
@@ -38,6 +38,65 @@ export const TABLE_SCOPE: Record<string, ScopeType> = {
 
   // Audit trail (tenant-scoped, append-only — no soft-delete)
   audit_logs: { type: "tenant", softDelete: false },
+
+  // -------------------------------------------------------------------------
+  // ReportFlow domain (decisions §8). Scope types are taken from that table
+  // verbatim — do not "fix" one without amending the design doc.
+  // -------------------------------------------------------------------------
+
+  // INPUT side — the calibration axis (§3.1). Curated configuration, so
+  // soft-delete: a deleted document type must stay resolvable from the
+  // extractions and documents that still reference it.
+  providers: { type: "tenant", softDelete: true },
+  document_types: { type: "tenant", softDelete: true },
+  extract_templates: { type: "tenant", softDelete: true },
+  extract_fields: { type: "tenant", softDelete: true },
+
+  // OUTPUT side — the template axis (§3.2). `lov`, not `tenant`, because
+  // `tenant_id IS NULL` means a SYSTEM template authored by the platform
+  // admin and visible to every org — exactly the list_of_values shape.
+  //
+  // lovConditions() now accepts any lov-registered table that has a tenantId
+  // column (default `list_of_values`), so outbound_templates queries call
+  // lovConditions(outboundTemplates, mode) directly. conditions() still
+  // throws for `lov` tables on purpose — the dedicated accessor is
+  // api/db/outbound-access.ts.
+  //
+  // outbound_template_versions carries NO tenant_id of its own (dropped: a
+  // denormalised copy could silently disagree with the parent, and a MATCH
+  // SIMPLE composite FK can't guard the NULL case). It stays registered
+  // `lov` here purely so conditions()/assertTenantScoped() keep throwing on
+  // it — the real access path is always a join through the parent
+  // outbound_templates row, via api/db/outbound-access.ts, never a direct
+  // scoped read of this table.
+  outbound_templates: { type: "lov" },
+  outbound_template_versions: { type: "lov" },
+
+  // The account's own customers — the people a report is ABOUT (§2).
+  clients: { type: "tenant", softDelete: true },
+
+  // Pipeline artifacts. Documents and reports are user-owned things that can
+  // be removed from the UI, hence soft-delete. Extractions are the cached,
+  // billed result of a paid hop keyed by unique(s3_key, calibration_rev)
+  // (§12.8) — append-only; recalibration invalidates by bumping the rev, not
+  // by deleting rows. report_documents is a join whose rows die with their
+  // report (ON DELETE CASCADE), and report_jobs is an append-only log whose
+  // status only ever moves forward (§12.1).
+  documents: { type: "tenant", softDelete: true },
+  extractions: { type: "tenant", softDelete: false },
+  reports: { type: "tenant", softDelete: true },
+  report_documents: { type: "tenant", softDelete: false },
+  report_jobs: { type: "tenant", softDelete: false },
+
+  // Billing (§7). ai_credentials stores a parameter NAME, never a key, and is
+  // edited in place. ai_charges is an immutable ledger — `ref_id` UNIQUE is
+  // the idempotency, and `owed_usd_cents` is frozen at write time.
+  ai_credentials: { type: "tenant", softDelete: false },
+  ai_charges: { type: "tenant", softDelete: false },
+
+  // Deployment-wide multiplier knobs. No tenant_id at all — platform admin
+  // only, reached through `global` scope (decisions §2, §8).
+  credit_config: { type: "global", softDelete: false },
 };
 
 type ScopeOptions = {
@@ -66,6 +125,52 @@ function hasTenant(tenantId: string | undefined): tenantId is string {
   return tenantId !== undefined && tenantId.length > 0;
 }
 
+/**
+ * Internal: shared system/tenant/combined split for any table with a
+ * tenantId column, optionally ANDed with an extra equality condition (used
+ * by the list_of_values `type` filter) and the soft-delete filter.
+ */
+function buildLovConditions(args: {
+  table: PgTable;
+  tenantId: string | undefined;
+  mode: LovScopeMode;
+  includeDeleted: boolean;
+  extra?: SQL;
+}): SQL {
+  const { table, tenantId, mode, includeDeleted, extra } = args;
+  const columns = table as unknown as Record<string, SQL | undefined>;
+  const tenantCol = columns["tenantId"];
+  if (tenantCol === undefined) {
+    throw new Error(
+      `lovConditions: table "${tableNameOf(table)}" has no tenantId column — it cannot be ` +
+        `queried through lovConditions().`,
+    );
+  }
+  const deletedCol = columns["deletedAt"];
+
+  const baseConditions: SQL[] = [];
+  if (extra !== undefined) {
+    baseConditions.push(extra);
+  }
+  if (!includeDeleted && deletedCol !== undefined) {
+    baseConditions.push(isNull(deletedCol));
+  }
+
+  if (mode === "system") {
+    return requireSql(and(...baseConditions, isNull(tenantCol)));
+  }
+
+  if (!hasTenant(tenantId)) {
+    throw new Error("tenantId required for tenant/combined LOV queries");
+  }
+
+  if (mode === "tenant") {
+    return requireSql(and(...baseConditions, eq(tenantCol, tenantId)));
+  }
+
+  return requireSql(and(...baseConditions, or(eq(tenantCol, tenantId), isNull(tenantCol))));
+}
+
 /** Internal: read the physical table name off a drizzle table object. */
 function tableNameOf(table: PgTable): string {
   const tableRecord = table as unknown as Record<string | symbol, unknown>;
@@ -78,7 +183,14 @@ function tableNameOf(table: PgTable): string {
 export type ScopedDb = {
   readonly tenantId: string | undefined;
   conditions<T extends PgTable>(table: T): SQL;
+  /** list_of_values reads — filtered by `type`, split system/tenant/combined. */
   lovConditions(query: LovQuery): SQL;
+  /**
+   * Generalized form: any lov-registered table with a tenantId column
+   * (e.g. outboundTemplates). No `type` column involved — just the
+   * system/tenant/combined tenantId split.
+   */
+  lovConditions(table: PgTable, mode?: LovScopeMode): SQL;
   withTenant<T extends Record<string, unknown>>(data: T): T & { tenantId: string };
 };
 
@@ -143,38 +255,41 @@ export function createScopedDb(options: ScopeOptions = {}): ScopedDb {
     },
 
     /**
-     * LOV-specific conditions. type is REQUIRED; type-less queries are a foot-gun.
+     * LOV-specific conditions, generalized to any lov-registered table that
+     * has a tenantId column (default `list_of_values`).
      * - 'system'   → only system values (tenant_id IS NULL).
      * - 'tenant'   → only this org's custom values.
      * - 'combined' → both (default, for UI dropdowns).
      * Soft-delete (deleted_at IS NULL) is applied unless includeDeleted is set.
+     *
+     * Two call shapes:
+     *   lovConditions({ type, mode, includeDeleted })  — list_of_values, `type`
+     *     REQUIRED (type-less LOV reads are a foot-gun). This is the existing
+     *     shape every current call site uses; the table defaults to
+     *     `list_of_values`.
+     *   lovConditions(table, mode)                     — any other
+     *     lov-registered table with a tenantId column, e.g.
+     *     lovConditions(outboundTemplates, "combined"). No `type` column
+     *     involved, just the system/tenant/combined tenantId split.
      */
-    lovConditions(query: LovQuery): SQL {
-      const { type, mode = "combined", includeDeleted: includeDel = false } = query;
-
-      const baseConditions: SQL[] = [eq(listOfValues.type, type)];
-      if (!includeDel) {
-        baseConditions.push(isNull(listOfValues.deletedAt));
+    lovConditions(arg1: LovQuery | PgTable, arg2?: LovScopeMode): SQL {
+      if (is(arg1, PgTable)) {
+        return buildLovConditions({
+          table: arg1,
+          tenantId,
+          mode: arg2 ?? "combined",
+          includeDeleted: false,
+        });
       }
 
-      if (mode === "system") {
-        return requireSql(and(...baseConditions, isNull(listOfValues.tenantId)));
-      }
-
-      if (!hasTenant(tenantId)) {
-        throw new Error("tenantId required for tenant/combined LOV queries");
-      }
-
-      if (mode === "tenant") {
-        return requireSql(and(...baseConditions, eq(listOfValues.tenantId, tenantId)));
-      }
-
-      return requireSql(
-        and(
-          ...baseConditions,
-          or(eq(listOfValues.tenantId, tenantId), isNull(listOfValues.tenantId)),
-        ),
-      );
+      const { type, mode = "combined", includeDeleted: includeDel = false } = arg1;
+      return buildLovConditions({
+        table: listOfValues,
+        tenantId,
+        mode,
+        includeDeleted: includeDel,
+        extra: eq(listOfValues.type, type),
+      });
     },
 
     /**
