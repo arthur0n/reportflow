@@ -81,7 +81,7 @@ const sharedRules = {
 
 export default [
   {
-    ignores: ["dist/", "node_modules/", ".aws-sam/", "drizzle/meta/", "app/src/components/ui/**", "vite.config.ts"],
+    ignores: ["dist/", "node_modules/", ".aws-sam/", "drizzle/meta/", "app/src/components/ui/**", "vite.config.ts", "poc/**"],
   },
   js.configs.recommended,
   // TypeScript files (.ts) — strict function limits

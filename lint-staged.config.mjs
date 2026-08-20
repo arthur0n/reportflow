@@ -8,11 +8,13 @@
 
 const ESLINT_IGNORED_SEGMENT = "/app/src/components/ui/";
 const ESLINT_IGNORED_FILES = ["/vite.config.ts"];
+const ESLINT_IGNORED_DIRS = ["/poc/"];
 
 function shouldLint(file) {
   return (
     !file.includes(ESLINT_IGNORED_SEGMENT) &&
-    !ESLINT_IGNORED_FILES.some((suffix) => file.endsWith(suffix))
+    !ESLINT_IGNORED_FILES.some((suffix) => file.endsWith(suffix)) &&
+    !ESLINT_IGNORED_DIRS.some((seg) => file.includes(seg))
   );
 }
 

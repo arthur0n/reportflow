@@ -41,3 +41,6 @@ yarn-error.log*
 coverage/
 *.lcov
 .vitest-cache/
+
+# POC scratch output — derived from real client PDFs, never committed
+poc/out/

@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{meta.titulo}}</title>
+    <style>
+      /* ---- §5.4 print contract. Chrome's print engine IS headless Chrome. ---- */
+      @page { size: A4; margin: 18mm 15mm; }
+      .capa  { break-after: page; }
+      .secao { break-inside: avoid; }
+      thead  { display: table-header-group; }
+      tr     { break-inside: avoid; }
+
+      /* No @page margin boxes: Blink does not implement CSS Paged Media margin
+         boxes, so running headers / footers / page numbers are not achievable
+         with window.print(). Decided (§5.4): no page numbers, clean document. */
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: #eef1f6;
+        color: #1f2733;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        font-size: 10.5px;
+        line-height: 1.45;
+      }
+      .folha { max-width: 210mm; margin: 12mm auto; padding: 14mm; background: #fff; box-shadow: 0 2px 18px rgba(20, 30, 50, 0.12); }
+
+      /* header */
+      .cabecalho { display: flex; justify-content: space-between; gap: 18px; background: #253449; color: #fff; padding: 16px 20px; border-radius: 3px; }
+      .cabecalho h1 { margin: 0; font-size: 18px; white-space: nowrap; letter-spacing: 0.4px; text-transform: uppercase; }
+      .cabecalho p { margin: 5px 0 0; font-size: 9.5px; color: #a9b6c9; text-transform: uppercase; letter-spacing: 0.3px; }
+      .cabecalho .meta { text-align: right; font-size: 9.5px; color: #c7d2e0; line-height: 1.6; flex: none; }
+      .cabecalho .meta b { color: #fff; }
+
+      /* section titles — the accent bar from the reference layout */
+      h2 { display: flex; align-items: center; gap: 8px; margin: 22px 0 8px; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.3px; color: #253449; }
+      h2::before { content: ""; width: 4px; height: 15px; background: #3f6fb0; border-radius: 2px; }
+
+      /* 1. identificação — two-column label/value grid */
+      .identificacao { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid #dfe5ee; border-radius: 3px; overflow: hidden; }
+      .par { display: grid; grid-template-columns: 130px 1fr; gap: 10px; padding: 9px 12px; border-bottom: 1px solid #eef1f6; }
+      .par:nth-child(odd) { border-right: 1px solid #eef1f6; }
+      .par .rotulo { font-weight: 600; color: #3f6fb0; }
+
+      /* 2. demonstrativo */
+      table { width: 100%; border-collapse: collapse; font-size: 10px; }
+      thead th { background: #253449; color: #fff; text-align: left; padding: 8px 9px; font-size: 8.5px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+      tbody td { padding: 7px 9px; border-bottom: 1px solid #eef1f6; vertical-align: top; }
+      tbody tr:nth-child(even) { background: #fafbfd; }
+      .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+      .forte { font-weight: 700; }
+      .ref { color: #62708a; }
+      .detalhe { display: block; color: #8592a8; font-size: 9px; margin-top: 2px; }
+      tfoot td { padding: 8px 9px; border-top: 2px solid #253449; font-weight: 700; background: #f4f7fb; }
+
+      /* KPI boxes */
+      .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
+      .kpi { border: 1px solid #dfe5ee; border-radius: 3px; padding: 10px 12px; text-align: center; }
+      .kpi span { display: block; font-size: 8px; text-transform: uppercase; letter-spacing: 0.6px; color: #62708a; }
+      .kpi strong { display: block; margin-top: 5px; font-size: 14px; font-variant-numeric: tabular-nums; }
+      .kpi.receita strong { color: #1f7a4d; }
+      .kpi.despesa strong { color: #b3261e; }
+      .kpi.iva strong { color: #b06a00; }
+      .kpi.total { background: #eff4fb; border-color: #c6d8ef; }
+      .kpi.total strong { color: #2f5f9e; }
+
+      /* 3. verificações */
+      .verificacoes { border: 1px solid #dfe5ee; border-radius: 3px; }
+      .verificacao { display: grid; grid-template-columns: 165px 130px 1fr; gap: 10px; align-items: start; padding: 9px 12px; border-bottom: 1px solid #eef1f6; }
+      .verificacao:last-child { border-bottom: 0; }
+      .verificacao .rotulo { font-weight: 700; }
+      .badge { display: inline-block; padding: 2px 7px; border-radius: 3px; font-size: 8.5px; font-weight: 700; letter-spacing: 0.4px; }
+      .badge--ok { background: #e3f5ea; color: #1f7a4d; }
+      .badge--atencao { background: #fdf0d9; color: #96590a; }
+      .badge--info { background: #e8eef8; color: #33538a; }
+
+      /* 4. notas */
+      .nota { border-left: 3px solid #3f6fb0; background: #f7f9fc; padding: 11px 14px; border-radius: 0 3px 3px 0; margin-bottom: 9px; text-align: justify; }
+      .nota b { color: #253449; }
+      .rodape { margin-top: 18px; padding-top: 9px; border-top: 1px solid #dfe5ee; font-size: 8.5px; color: #94a1b5; text-align: justify; }
+      .aviso { margin: 0 auto 10px; max-width: 210mm; padding: 9px 14px; background: #fff6e0; border: 1px solid #f0d69a; border-radius: 3px; font-size: 11px; color: #7a5406; }
+
+      /* ---- print overrides LAST ----------------------------------------
+         A @media block adds no specificity, so these have to come after the
+         screen rules they override. Placed first, `body { background: #fff }`
+         silently loses to the plain `body` rule below it and the exported PDF
+         carries the on-screen grey right to the paper edge. Found by actually
+         printing the file rather than by reading the CSS. */
+      @media print {
+        .no-print { display: none !important; }
+        html, body { background: #fff !important; }
+        .folha { box-shadow: none; margin: 0; padding: 0; max-width: none; }
+        /* tfoot defaults to table-footer-group and would repeat the grand
+           total at the bottom of EVERY page, where it reads as a running
+           subtotal that does not match the rows above it. */
+        tfoot { display: table-row-group; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="aviso no-print">
+      Para exportar: <b>Imprimir → Salvar como PDF</b>, papel A4, margens padrão e a opção
+      <b>“Cabeçalhos e rodapés” desmarcada</b> — assim o PDF fica exatamente igual a esta página, sem URL nem data do navegador.
+    </div>
+
+    <div class="folha">
+      <div class="cabecalho secao">
+        <div>
+          <h1>{{meta.titulo}}</h1>
+          <p>{{meta.subtitulo}}</p>
+        </div>
+        <div class="meta">
+          <div><b>Período de referência:</b> {{meta.periodo}}</div>
+          <div><b>Emissão:</b> {{date meta.emissao}}</div>
+          <div><b>Elaborado por:</b> {{meta.elaborado_por}}</div>
+        </div>
+      </div>
+
+      <section class="secao">
+        <h2>1. Identificação do imóvel e partes contratuais</h2>
+        <div class="identificacao">
+          {{#each identificacao}}
+            <div class="par"><span class="rotulo">{{rotulo}}:</span><span>{{valor}}</span></div>
+          {{/each}}
+        </div>
+      </section>
+
+      <section>
+        <h2>2. Demonstrativo financeiro do período ({{meta.periodo}})</h2>
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 62px">Data</th>
+              <th>Histórico / Lançamento</th>
+              <th style="width: 92px">Documento</th>
+              <th class="num" style="width: 74px">Base (€)</th>
+              <th class="num" style="width: 66px">IVA (€)</th>
+              <th class="num" style="width: 80px">Total (€)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{#each linhas}}
+              <tr>
+                <td class="num">{{date data}}</td>
+                <td>
+                  {{familia}}
+                  <span class="detalhe">{{descricao}}</span>
+                </td>
+                <td class="ref">{{numero}}</td>
+                <td class="num">{{money base_cents}}</td>
+                <td class="num">{{money iva_cents}}</td>
+                <td class="num forte">{{money total_cents}}</td>
+              </tr>
+            {{/each}}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colspan="3">Total do período — {{meta.n_faturas}} faturas</td>
+              <td class="num">{{money totais.base_cents}}</td>
+              <td class="num">{{money totais.iva_cents}}</td>
+              <td class="num">{{money totais.documento_cents}}</td>
+            </tr>
+          </tfoot>
+        </table>
+
+        <div class="kpis secao">
+          <div class="kpi receita"><span>Base tributável</span><strong>{{money totais.base_cents}}</strong></div>
+          <div class="kpi iva"><span>IVA (23%)</span><strong>{{money totais.iva_cents}}</strong></div>
+          <div class="kpi despesa"><span>Média mensal</span><strong>{{money totais.media_mensal_cents}}</strong></div>
+          <div class="kpi total"><span>Total faturado no período</span><strong>{{money totais.documento_cents}}</strong></div>
+        </div>
+      </section>
+
+      <section class="secao">
+        <h2>3. Verificação de obrigações, serviços e ocorrências</h2>
+        <div class="verificacoes">
+          {{#each verificacoes}}
+            <div class="verificacao">
+              <span class="rotulo">{{rotulo}}:</span>
+              <span><span class="badge badge--{{tom}}">{{estado}}</span></span>
+              <span>{{nota}}</span>
+            </div>
+          {{/each}}
+        </div>
+      </section>
+
+      <section class="secao">
+        <h2>4. Notas da secretaria executiva</h2>
+        <div class="nota">{{ai "notas_executivas"}}</div>
+        <div class="nota"><b>Acompanhamento executivo:</b> {{ai "acompanhamento"}}</div>
+
+        {{#if contrato}}
+          <div class="rodape">
+            Documento gerado para controle interno. Informações extraídas das faturas emitidas por
+            {{contrato.parte_segunda}} e do contrato de administração celebrado em {{date contrato.data_celebracao}}
+            ({{contrato.prazo}} Denúncia mediante comunicação escrita com {{contrato.denuncia_dias}} dias de antecedência).
+            Retribuição contratual: {{money contrato.retribuicao_cents}} ({{contrato.retribuicao_periodicidade}}). {{contrato.retribuicao_nota}}
+          </div>
+        {{/if}}
+      </section>
+    </div>
+  </body>
+</html>

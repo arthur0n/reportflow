@@ -1,0 +1,28 @@
+{
+  "//": "POC-only. Deliberately NOT wired into the root tsconfig or eslint config: both use explicit include/files allowlists, so poc/ stays out of `pnpm check` and `pnpm lint` and cannot break the main build. Same strictness settings, so the code is already compliant when it is ported into api/lib.",
+  "include": ["**/*.ts"],
+  "exclude": ["out"],
+  "compilerOptions": {
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "lib": ["esnext"],
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noImplicitOverride": true,
+
+    "types": ["node"]
+  }
+}
