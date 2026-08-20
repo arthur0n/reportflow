@@ -8,6 +8,9 @@
 //             the values, and the per-field problems, re-computed on read.
 //   correct — the human's repaired payload. Full validity or nothing; then
 //             the `revisar` job is closed.
+//   verify  — §12.13's adversarial pass over ONE cached extraction: a different
+//             model, the PDF, and a refute-this prompt. It never rewrites a
+//             value; the verdicts come back on the job row.
 //   list    — one status per document, for the documents-page column.
 //
 // This router stays thin, the same split as documents.router.ts and
@@ -32,9 +35,11 @@ import {
 import {
   correctExtraction,
   getExtractionView,
-  listExtractionStatus,
   startExtraction,
 } from "../../services/extraction-service";
+import { listExtractionStatus } from "../../services/extraction-status";
+import { startVerify } from "../../services/verify-service";
+import { StartVerifyInput } from "../../../shared/validation/report-schemas";
 import { enqueueRelayJob } from "../../lib/relay";
 import { getDocumentBytes } from "../../lib/storage";
 
@@ -53,6 +58,14 @@ export const extractionsRouter = router({
 
   correct: protectedProcedure.input(CorrectExtractionInput).mutation(async ({ ctx, input }) => {
     return correctExtraction(db, { tenantId: ctx.tenantId, userId: ctx.userId }, input);
+  }),
+
+  verify: protectedProcedure.input(StartVerifyInput.options[0]).mutation(async ({ ctx, input }) => {
+    return startVerify(
+      { db, enqueue: enqueueRelayJob },
+      { tenantId: ctx.tenantId, userId: ctx.userId },
+      input,
+    );
   }),
 
   list: protectedProcedure.query(async ({ ctx }) => {

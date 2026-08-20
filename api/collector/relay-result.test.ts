@@ -24,7 +24,20 @@ describe("parseRelayResult", () => {
       content: '{"total":10}',
       provider: "gemini",
       model: "gemini-2.5-pro",
+      // §7 bills on this, so it has to survive the parse. Carried through
+      // UNNARROWED — a provider that reports cache-read or thinking tokens we
+      // do not model yet must still reach `ai_charges.usage` intact.
+      usage: { input_tokens: 100, output_tokens: 20 },
     });
+  });
+
+  // A malformed usage block is a fact about BILLING, not about whether the hop
+  // answered. Throwing away a paid extraction over it would be the wrong trade
+  // in both directions; api/billing/charge.ts `readUsage` narrows it to zeros.
+  it("still reads a success whose usage block is missing", () => {
+    const { usage, ...withoutUsage } = SUCCESS;
+    void usage;
+    expect(parseRelayResult(withoutUsage)).toMatchObject({ kind: "success", usage: undefined });
   });
 
   it("reads a classified failure and keeps the classification", () => {

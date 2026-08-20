@@ -30,7 +30,7 @@
 //    for every downstream decision".
 
 import { TRPCError } from "@trpc/server";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import {
   documentTypes,
   documents,
@@ -49,11 +49,15 @@ import { loadTemplateFields } from "../collector/extraction-store";
 import { parseModelJson } from "../collector/relay-result";
 import { withSystemFields } from "../db/scope";
 import { extractDocumentText } from "../detection/page-text";
+import { buildExtractJob, RECALIBRATED_DURING_EXTRACTION } from "../extraction/extract-job";
+import { keyBinding, resolveModel } from "./credentials-service";
+import { statusOf, type ExtractionStatus } from "./extraction-status";
 import {
-  buildExtractJob,
-  RECALIBRATED_DURING_EXTRACTION,
-  resolveExtractionModel,
-} from "../extraction/extract-job";
+  loadLatestVerifyJobForDocument,
+  readExtractionVerify,
+  type VerifyState,
+} from "./verify-service";
+import type { FieldVerdictT } from "../../shared/validation/verify-schemas";
 import { jobKeyFor, mintJobId } from "../lib/relay";
 import { type FieldSpec, type InputMode } from "../../shared/validation/field-spec";
 import {
@@ -78,12 +82,6 @@ export interface ExtractionCtx {
   readonly tenantId: string;
   readonly userId: string;
 }
-
-/** What the UI shows in the documents list, in the pipeline's own vocabulary.
- * The pt-BR labels are the SCREEN's business (§4.2's five states) — a status
- * column that shipped strings from the server would be a second place to
- * change the wording. */
-export type ExtractionStatus = "idle" | "running" | "revisar" | "done" | "failed";
 
 // ---------------------------------------------------------------------------
 // Ownership. Every id below arrives from the browser and is a LOOKUP KEY,
@@ -240,11 +238,10 @@ export type StartExtractionOutcome =
  *
  * TEXT MODE READS THE PDF LOCALLY. §3.1: `input_mode` is a COST decision, and
  * `text` means the model is handed the extracted text layer INSTEAD of the
- * PDF. So the whole text is extracted here, for free, in the same Lambda that
- * already does it for detection — and a `text` template pointed at a document
- * with no text layer is REFUSED rather than quietly promoted to a vision hop,
- * because §3.1 has no fallback ladder and a silent 5–20× cost increase is not
- * this function's decision to make.
+ * PDF. So the whole text is extracted here, for free — and a `text` template
+ * pointed at a document with no text layer is REFUSED rather than quietly
+ * promoted to a vision hop, because §3.1 has no fallback ladder and a silent
+ * 5–20× cost increase is not this function's decision to make.
  *
  * ORDER IS THE SAME AS EVERY OTHER ENQUEUE PATH: the `report_jobs` row is
  * committed BEFORE the S3 PutObject (api/collector/collect.ts's requirement),
@@ -254,8 +251,7 @@ export type StartExtractionOutcome =
  * concurrent calls for the same document used to pass the same read-based
  * preflight and buy two hops; the insert now carries ON CONFLICT DO NOTHING
  * against a partial unique index, so exactly one of them enqueues and the
- * other returns the winner's job id. The §12.8 cache cannot cover this case —
- * at the moment of the race neither extraction exists yet.
+ * other returns the winner's job id.
  */
 export async function startExtraction(
   deps: ExtractionDeps,
@@ -305,7 +301,9 @@ export async function startExtraction(
   }
 
   const documentText = await loadDocumentText(deps, template.inputMode, doc.s3Key);
-  const { provider, model } = resolveExtractionModel(ctx.tenantId);
+  // §6/§7 — the account's model and whose key pays, resolved once. Refuses
+  // BEFORE the money is spent when the resolved model has no price (§10.5).
+  const resolved = await resolveModel(deps.db, ctx.tenantId, "extract");
   const payload = buildExtractJob({
     tenantId: ctx.tenantId,
     s3Key: doc.s3Key,
@@ -318,8 +316,9 @@ export async function startExtraction(
     calibrationRev: template.calibrationRev,
     fields,
     documentText,
-    provider,
-    model,
+    provider: resolved.provider,
+    model: resolved.model,
+    ...keyBinding(resolved),
     providerName: template.providerName,
     documentTypeName: template.typeName,
   });
@@ -340,13 +339,9 @@ export async function startExtraction(
   // (tenant_id, document_id) WHERE status='pending' AND kind='extract' — is
   // what makes two concurrent callers produce ONE paid hop instead of two.
   // Postgres decides the race; the loser inserts nothing and learns it lost
-  // from the empty row set, which is the same shape as
-  // `insertDocumentIdempotent` and as every compare-and-set in
-  // api/collector/job-state.ts.
-  //
-  // No conflict TARGET is named: the only unique constraint an insert here
-  // can plausibly violate is that index (`s3_key` carries a freshly minted
-  // uuid), and naming a partial index as a target means restating its
+  // from the empty row set. No conflict TARGET is named: the only constraint
+  // an insert here can plausibly violate is that index (`s3_key` carries a
+  // freshly minted uuid), and naming a partial index as a target restates its
   // predicate in a second place that can drift from the schema.
   const inserted = await deps.db
     .insert(reportJobs)
@@ -469,32 +464,13 @@ export interface ExtractionView {
    * can move under a stored verdict (§12.8). The screen re-runs the identical
    * function as the human types. */
   readonly problems: readonly FieldProblem[];
-}
-
-/**
- * The five states §4.2 can leave a document in, derived rather than stored.
- *
- * ORDER IS THE MEANING. A job in flight wins over a cached extraction, because
- * that combination is a RE-extraction after a recalibration (§12.8) and
- * "extraindo" is the true answer. A cached extraction then wins over any
- * settled job, because the artifact is the point and a `revisar` a human
- * already repaired must not keep saying `revisar`. Takes primitives, not rows,
- * so both callers can reach it — one holds full rows, the other two projections.
- */
-function statusOf(jobStatus: string | null, hasCached: boolean): ExtractionStatus {
-  if (jobStatus === "pending") {
-    return "running";
-  }
-  if (hasCached) {
-    return "done";
-  }
-  if (jobStatus === "revisar") {
-    return "revisar";
-  }
-  if (jobStatus === "failed") {
-    return "failed";
-  }
-  return "idle";
+  /** §12.13's badge, READ FROM THE JOB ROW rather than a column on
+   * `extractions`: a verdict is a claim about the payload as it stood, and
+   * `correctExtraction` replaces that payload. `verifyVerdicts` carries the
+   * refuted fields for the screen to point at — the verifier NEVER rewrites,
+   * so they are flags a human resolves. */
+  readonly verify: VerifyState;
+  readonly verifyVerdicts: readonly FieldVerdictT[];
 }
 
 /**
@@ -518,6 +494,9 @@ export async function getExtractionView(
       : await loadFrozenTemplate(dbHandle, ctx.tenantId, doc.documentTypeId);
 
   const job = await loadLatestJobForDocument(dbHandle, ctx.tenantId, documentId, "extract");
+  const verify = readExtractionVerify(
+    await loadLatestVerifyJobForDocument(dbHandle, ctx.tenantId, documentId),
+  );
   const document = { id: doc.id, fileName: doc.fileName, s3Key: doc.s3Key };
 
   if (template === null) {
@@ -531,6 +510,8 @@ export async function getExtractionView(
       staleTemplate: isStaleTemplateJob(job),
       data: null,
       problems: [],
+      verify: verify.view,
+      verifyVerdicts: verify.verdicts,
     };
   }
 
@@ -562,6 +543,8 @@ export async function getExtractionView(
     staleTemplate: isStaleTemplateJob(job),
     data,
     problems: data === null ? [] : validateExtraction(fields, data).problems,
+    verify: verify.view,
+    verifyVerdicts: verify.verdicts,
   };
 }
 
@@ -678,99 +661,4 @@ export async function correctExtraction(
   });
 
   return { extractionId: row.id, resolvedJobs };
-}
-
-// ---------------------------------------------------------------------------
-// list — the documents-page status column
-// ---------------------------------------------------------------------------
-
-export interface ExtractionStatusRow {
-  readonly documentId: string;
-  readonly status: ExtractionStatus;
-  readonly extractionId: string | null;
-  readonly corrected: boolean;
-  readonly jobId: string | null;
-  readonly error: string | null;
-  /** See `ExtractionView.staleTemplate` — the list offers "extrair novamente"
-   * for this one, not "revisar". */
-  readonly staleTemplate: boolean;
-}
-
-/**
- * One status per document, for the list.
- *
- * Read as two flat tenant-scoped queries and joined in memory rather than as
- * one SQL join, because the status depends on a fact SQL cannot express
- * cheaply here: an extraction only counts if it sits at the template's CURRENT
- * `calibration_rev` (§12.8). Expressing that as a join means dragging
- * `extract_templates` in through `documents.document_type_id` and comparing
- * revs per row; the tenant's document count is a page, not a corpus.
- */
-export async function listExtractionStatus(
-  dbHandle: DbLike,
-  tenantId: string,
-): Promise<ExtractionStatusRow[]> {
-  const jobs = await dbHandle
-    .select({
-      id: reportJobs.id,
-      documentId: reportJobs.documentId,
-      status: reportJobs.status,
-      error: reportJobs.error,
-      createdAt: reportJobs.createdAt,
-    })
-    .from(reportJobs)
-    .where(and(eq(reportJobs.tenantId, tenantId), eq(reportJobs.kind, "extract")))
-    .orderBy(desc(reportJobs.createdAt));
-
-  const rows = await dbHandle
-    .select({
-      id: extractions.id,
-      documentId: extractions.documentId,
-      corrected: extractions.corrected,
-      calibrationRev: extractions.calibrationRev,
-      templateRev: extractTemplates.calibrationRev,
-    })
-    .from(extractions)
-    .innerJoin(
-      extractTemplates,
-      and(
-        eq(extractTemplates.id, extractions.extractTemplateId),
-        // Redundant against the FK — an extraction is only ever written
-        // against a template `resolveExtractionTarget` already scoped — and
-        // present anyway: "the tenant is in the WHERE clause" is a rule this
-        // codebase keeps even where a constraint would have covered it.
-        eq(extractTemplates.tenantId, tenantId),
-        isNull(extractTemplates.deletedAt),
-      ),
-    )
-    .where(eq(extractions.tenantId, tenantId));
-
-  const current = new Map<string, { id: string; corrected: boolean }>();
-  for (const row of rows) {
-    if (row.calibrationRev === row.templateRev) {
-      current.set(row.documentId, { id: row.id, corrected: row.corrected });
-    }
-  }
-
-  const latestJob = new Map<string, (typeof jobs)[number]>();
-  for (const job of jobs) {
-    if (job.documentId !== null && !latestJob.has(job.documentId)) {
-      latestJob.set(job.documentId, job);
-    }
-  }
-
-  const documentIds = new Set([...current.keys(), ...latestJob.keys()]);
-  return [...documentIds].map((documentId) => {
-    const job = latestJob.get(documentId);
-    const cached = current.get(documentId);
-    return {
-      documentId,
-      status: statusOf(job?.status ?? null, cached !== undefined),
-      extractionId: cached?.id ?? null,
-      corrected: cached?.corrected ?? false,
-      jobId: job?.id ?? null,
-      error: job?.error ?? null,
-      staleTemplate: job?.status === "revisar" && job.error === RECALIBRATED_DURING_EXTRACTION,
-    };
-  });
 }

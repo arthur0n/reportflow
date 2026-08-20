@@ -31,13 +31,25 @@ import {
   documents,
   extractions,
   reportDocuments,
+  reportJobs,
   reports,
 } from "../../drizzle/schema";
 import type { DbLike } from "../collector/job-state";
 import { assertVersionVisible, getOutboundTemplateVersion } from "../db/outbound-access";
 import { withSystemFields } from "../db/scope";
-import { parseReportContent, withSlot, type ReportContent } from "../render/report-content";
-import type { RoleBinding } from "../render/report-context";
+import {
+  parseReportContent,
+  withSlot,
+  type RefutedClaim,
+  type ReportContent,
+} from "../render/report-content";
+import {
+  buildReportContext,
+  todayInSaoPaulo,
+  type BuiltContext,
+  type ReportMeta,
+  type RoleBinding,
+} from "../render/report-context";
 import { parseRoles, parseSlots } from "./outbound-template-service";
 import type { RoleDeclarationT, SlotDeclarationT } from "../../shared/validation/outbound-schemas";
 import type {
@@ -188,6 +200,49 @@ export function bindingsOf(bundle: ReportBundle): RoleBinding[] {
   }));
 }
 
+/** Every extraction bound to this report, sorted — §12.6's ref_id half, and
+ * the analysis verifier's ground-truth set. */
+export function extractionIdsOf(bundle: ReportBundle): string[] {
+  const ids: string[] = [];
+  for (const list of bundle.attached.values()) {
+    for (const item of list) {
+      ids.push(item.extractionId);
+    }
+  }
+  return ids.sort();
+}
+
+function metaFor(bundle: ReportBundle): ReportMeta {
+  let n = 0;
+  for (const list of bundle.attached.values()) {
+    n += list.length;
+  }
+  return {
+    titulo: bundle.report.title ?? "Relatório",
+    cliente: bundle.clientName,
+    emissao: todayInSaoPaulo(),
+    n_documentos: n,
+  };
+}
+
+/**
+ * THE DETERMINISTIC HALF, from one bundle (§12.12b).
+ *
+ * ONE definition, because three callers now need the identical object and they
+ * must not disagree about it: the render/publish path
+ * (api/services/report-publish.ts), the analysis hop — which hands this to the
+ * model AS ITS FACTS — and the analysis VERIFIER, which §12.13's own amendment
+ * requires to see the same computed context the writer saw. A second builder
+ * anywhere makes the verifier refute prose that was correct.
+ */
+export function reportContextOf(bundle: ReportBundle): BuiltContext {
+  return buildReportContext({
+    roles: bundle.roles,
+    bindings: bindingsOf(bundle),
+    meta: metaFor(bundle),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // create / list / get
 // ---------------------------------------------------------------------------
@@ -285,8 +340,26 @@ export interface ReportDetail {
   readonly slots: readonly (SlotDeclarationT & {
     readonly text: string | null;
     readonly edited: boolean;
+    /** §12.12c, advisory — numerals with no deterministic source, recorded
+     * when the prose arrived. Publication recomputes and refuses. */
+    readonly numeralFlags: readonly string[];
+    /** §12.13, blocking — claims the verifier would not confirm. */
+    readonly refuted: readonly RefutedClaim[];
+    /** `null` = never verified, which is a different fact from "verified and
+     * clean" and the only reason this is not derived from `refuted`. */
+    readonly verifiedAt: string | null;
   })[];
   readonly missingRequiredRoles: readonly string[];
+  /** The most recent hop of each kind for this report, so the screen can poll
+   * one row instead of guessing (§4). */
+  readonly analysisJob: ReportJobView | null;
+  readonly verifyJob: ReportJobView | null;
+}
+
+export interface ReportJobView {
+  readonly id: string;
+  readonly status: string;
+  readonly error: string | null;
 }
 
 export async function getReport(
@@ -295,6 +368,10 @@ export async function getReport(
   reportId: string,
 ): Promise<ReportDetail> {
   const bundle = await loadReportBundle(dbHandle, tenantId, reportId);
+  const [analysisJob, verifyJob] = await Promise.all([
+    latestReportJob(dbHandle, tenantId, reportId, "analyse"),
+    latestReportJob(dbHandle, tenantId, reportId, "verify"),
+  ]);
   const roles = bundle.roles.map((role) => ({
     ...role,
     attached: (bundle.attached.get(role.key) ?? []).map((a) => ({
@@ -314,12 +391,46 @@ export async function getReport(
     roles,
     slots: bundle.slots.map((slot) => {
       const stored = bundle.content.slots[slot.slug];
-      return { ...slot, text: stored?.text ?? null, edited: stored?.edited ?? false };
+      return {
+        ...slot,
+        text: stored?.text ?? null,
+        edited: stored?.edited ?? false,
+        numeralFlags: stored?.numeralFlags ?? [],
+        refuted: stored?.refuted ?? [],
+        verifiedAt: stored?.verifiedAt ?? null,
+      };
     }),
     missingRequiredRoles: roles
       .filter((r) => r.required && r.attached.length === 0)
       .map((r) => r.key),
+    analysisJob,
+    verifyJob,
   };
+}
+
+/** The newest `analyse` / `verify` job for a report. `request` is never
+ * selected: it is the system prompt, the facts and the model choice, and the
+ * browser has no use for any of them (jobs.router.ts withholds it for the same
+ * reason). */
+async function latestReportJob(
+  dbHandle: DbLike,
+  tenantId: string,
+  reportId: string,
+  kind: "analyse" | "verify",
+): Promise<ReportJobView | null> {
+  const rows = await dbHandle
+    .select({ id: reportJobs.id, status: reportJobs.status, error: reportJobs.error })
+    .from(reportJobs)
+    .where(
+      and(
+        eq(reportJobs.tenantId, tenantId),
+        eq(reportJobs.reportId, reportId),
+        eq(reportJobs.kind, kind),
+      ),
+    )
+    .orderBy(desc(reportJobs.createdAt))
+    .limit(1);
+  return rows[0] ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -460,10 +571,19 @@ export async function roleOptions(
 // ---------------------------------------------------------------------------
 
 /**
- * §5.2 — a human edit sets `edited: true`, and regeneration (#10) skips such a
- * slot by default. The flag is set HERE, by the act of editing, rather than
- * being an input: a client that could send `edited: false` alongside its own
- * prose could arrange for the next regeneration to eat it.
+ * §5.2 — a human edit sets `edited: true`, and regeneration skips such a slot
+ * by default. The flag is set HERE, by the act of editing, rather than being
+ * an input: a client that could send `edited: false` alongside its own prose
+ * could arrange for the next regeneration to eat it.
+ *
+ * AND THE EDIT CLEARS EVERY FLAG ON THE SLOT (#10). A numeral violation
+ * (§12.12c) and a refuted claim (§12.13) are both findings about PROSE, and
+ * this prose is now different prose — carrying them forward would block the
+ * publication of text nobody has actually judged. It is also the only exit
+ * from a refutation, since the verifier never rewrites: without it, one
+ * `refutado` wedges a report shut permanently. The numeral guard is
+ * recomputed at publish either way, so nothing is weakened by dropping the
+ * advisory copy.
  */
 export async function updateSlot(
   dbHandle: DbLike,

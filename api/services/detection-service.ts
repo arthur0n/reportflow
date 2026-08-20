@@ -29,6 +29,7 @@ import {
   UNKNOWN_TYPE_LABEL,
 } from "../detection/classify-job";
 import { jobKeyFor, mintJobId } from "../lib/relay";
+import { keyBinding, resolveModel } from "./credentials-service";
 import { parseModelJson } from "../collector/relay-result";
 
 export interface DetectionDeps {
@@ -129,7 +130,17 @@ export async function runDetection(
     return { outcome: "none" };
   }
 
-  const { payload } = buildDetectJob({ tenantId: ctx.tenantId, s3Key: doc.s3Key, types });
+  // §6/§7 — the account's model and whose key pays (§10.5 refuses an unpriced
+  // platform-key hop here, before any money is spent).
+  const resolved = await resolveModel(deps.db, ctx.tenantId, "detect");
+  const { payload } = buildDetectJob({
+    tenantId: ctx.tenantId,
+    s3Key: doc.s3Key,
+    types,
+    provider: resolved.provider,
+    model: resolved.model,
+    ...keyBinding(resolved),
+  });
   const jobId = mintJobId();
   const s3Key = jobKeyFor(ctx.tenantId, jobId);
   const stamped = withSystemFields({ userId: ctx.userId }, "create", {

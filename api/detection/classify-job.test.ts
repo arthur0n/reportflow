@@ -9,16 +9,18 @@
 
 import { describe, it, expect, vi } from "vitest";
 import type { DbLike } from "../collector/job-state";
+import { PLATFORM_DEFAULTS } from "../services/credentials-service";
 import {
   buildDetectJob,
-  DETECT_MODEL,
-  DETECT_PROVIDER,
+  detectRefKey,
   loadClassifiableTypes,
   UNKNOWN_TYPE_LABEL,
   type ClassifiableType,
 } from "./classify-job";
 
 const TENANT = "org_2abcTENANT";
+const DETECT_PROVIDER = PLATFORM_DEFAULTS.detect.provider;
+const DETECT_MODEL = PLATFORM_DEFAULTS.detect.model;
 
 function makeJoinDb(rows: unknown[]) {
   const where = vi.fn().mockResolvedValue(rows);
@@ -68,6 +70,8 @@ describe("buildDetectJob", () => {
       tenantId: TENANT,
       s3Key: `${TENANT}/doc.pdf`,
       types: TYPES,
+      provider: DETECT_PROVIDER,
+      model: DETECT_MODEL,
     });
 
     expect(payload["channel"]).toBe("ai");
@@ -87,6 +91,8 @@ describe("buildDetectJob", () => {
       tenantId: TENANT,
       s3Key: `${TENANT}/doc.pdf`,
       types: TYPES,
+      provider: DETECT_PROVIDER,
+      model: DETECT_MODEL,
     });
     const prompt = payload["prompt"] as string;
     expect(prompt).toContain("Toysmith / Nota Fiscal");
@@ -98,6 +104,8 @@ describe("buildDetectJob", () => {
       tenantId: TENANT,
       s3Key: `${TENANT}/doc.pdf`,
       types: TYPES,
+      provider: DETECT_PROVIDER,
+      model: DETECT_MODEL,
     });
     const schema = payload["schema"] as {
       properties: { document_type: { enum: string[] } };
@@ -114,6 +122,8 @@ describe("buildDetectJob", () => {
       tenantId: TENANT,
       s3Key: `${TENANT}/doc.pdf`,
       types: TYPES,
+      provider: DETECT_PROVIDER,
+      model: DETECT_MODEL,
     });
     expect(labelToDocumentTypeId.get("Toysmith / Nota Fiscal")).toBe("dt-1");
     expect(labelToDocumentTypeId.get("House Living / Fatura")).toBe("dt-2");
@@ -122,7 +132,29 @@ describe("buildDetectJob", () => {
 
   it("refuses to build a job with no document types to classify against", () => {
     expect(() =>
-      buildDetectJob({ tenantId: TENANT, s3Key: `${TENANT}/doc.pdf`, types: [] }),
+      buildDetectJob({
+        tenantId: TENANT,
+        s3Key: `${TENANT}/doc.pdf`,
+        types: [],
+        provider: DETECT_PROVIDER,
+        model: DETECT_MODEL,
+      }),
     ).toThrow();
+  });
+
+  // §12.6 — a hop that runs is a hop that is billed, and the binding rides the
+  // payload because the collector never sees the service that built the job.
+  it("carries the §12.6 billing binding, keyed on the document", () => {
+    const { payload } = buildDetectJob({
+      tenantId: TENANT,
+      s3Key: `${TENANT}/doc.pdf`,
+      types: TYPES,
+      provider: DETECT_PROVIDER,
+      model: DETECT_MODEL,
+    });
+    expect(payload["billing"]).toEqual({
+      source: "detect",
+      refKey: detectRefKey(`${TENANT}/doc.pdf`),
+    });
   });
 });

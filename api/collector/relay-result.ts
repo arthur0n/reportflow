@@ -25,6 +25,23 @@ export interface RelaySuccess {
   readonly content: string;
   readonly provider: string;
   readonly model: string;
+  /**
+   * The canonical usage envelope (relay/src/providers/types.ts `AiUsage`) —
+   * what §7 bills on, and the reason `costFor()` works across providers
+   * unchanged.
+   *
+   * Carried as `unknown` rather than a typed pair on purpose: a provider that
+   * reports cache-read or thinking tokens we do not model yet must survive the
+   * trip into `ai_charges.usage` (jsonb, for exactly this reason — see
+   * drizzle/tables/billing.ts). api/billing/charge.ts `readUsage` narrows the
+   * two counts it needs and leaves the rest intact.
+   *
+   * NOT part of the "is this a usable answer" test. A relay that wrote a
+   * result with a malformed usage block still answered the question the hop
+   * asked, and throwing away a paid extraction over a billing field would be
+   * the wrong trade in both directions.
+   */
+  readonly usage: unknown;
 }
 
 /** A failure, classified by the relay (relay/src/errors.ts). `permanent` means
@@ -85,7 +102,7 @@ export function parseRelayResult(raw: unknown): ParsedRelayResult {
       message: "relay result is neither a canonical success nor a classified error",
     };
   }
-  return { kind: "success", content, provider, model };
+  return { kind: "success", content, provider, model, usage: envelope["usage"] };
 }
 
 /**

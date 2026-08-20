@@ -19,9 +19,17 @@ const service = vi.hoisted(() => ({
   startExtraction: vi.fn(),
   getExtractionView: vi.fn(),
   correctExtraction: vi.fn(),
-  listExtractionStatus: vi.fn(),
 }));
 vi.mock("../../services/extraction-service", () => service);
+
+// The documents-page list moved to its own module (#10 split it out of
+// extraction-service.ts); it is mocked for the same reason the rest is.
+const status = vi.hoisted(() => ({ listExtractionStatus: vi.fn() }));
+vi.mock("../../services/extraction-status", () => status);
+
+// §12.13's entry point, enqueued from this router too.
+const verify = vi.hoisted(() => ({ startVerify: vi.fn() }));
+vi.mock("../../services/verify-service", () => verify);
 
 const relay = vi.hoisted(() => ({ enqueueRelayJob: vi.fn() }));
 vi.mock("../../lib/relay", () => relay);
@@ -50,10 +58,11 @@ function callerFor(tenantId: string) {
 }
 
 beforeEach(() => {
+  verify.startVerify.mockReset();
   service.startExtraction.mockReset();
   service.getExtractionView.mockReset();
   service.correctExtraction.mockReset();
-  service.listExtractionStatus.mockReset();
+  status.listExtractionStatus.mockReset();
   relay.enqueueRelayJob.mockReset();
   storage.getDocumentBytes.mockReset();
 });
@@ -172,11 +181,37 @@ describe("extractions.correct", () => {
 
 describe("extractions.list", () => {
   it("lists only the caller's own tenant", async () => {
-    service.listExtractionStatus.mockResolvedValue([{ documentId: DOC_ID, status: "done" }]);
+    status.listExtractionStatus.mockResolvedValue([{ documentId: DOC_ID, status: "done" }]);
 
     const out = await callerFor(TENANT).extractions.list();
 
     expect(out).toEqual([{ documentId: DOC_ID, status: "done" }]);
-    expect(service.listExtractionStatus).toHaveBeenCalledWith(expect.anything(), TENANT);
+    expect(status.listExtractionStatus).toHaveBeenCalledWith(expect.anything(), TENANT);
+  });
+});
+
+// §12.13 — the extraction half of the adversarial pass is enqueued here,
+// against an EXTRACTION id (the report half lives in reports.router.ts and
+// names a report). The discriminated input is what keeps the two apart.
+describe("extractions.verify", () => {
+  it("hands the verify path the real outbox writer, under the caller's tenant", async () => {
+    verify.startVerify.mockResolvedValue({ jobId: "j", target: "extraction" });
+    await callerFor(TENANT).extractions.verify({
+      target: "extraction",
+      extractionId: EXTRACTION_ID,
+    });
+    expect(verify.startVerify).toHaveBeenCalledWith(
+      expect.objectContaining({ enqueue: relay.enqueueRelayJob }),
+      { tenantId: TENANT, userId: "user-1" },
+      { target: "extraction", extractionId: EXTRACTION_ID },
+    );
+  });
+
+  it("refuses the analysis variant on this router", async () => {
+    await expect(
+      // @ts-expect-error — the input schema is the extraction branch only.
+      callerFor(TENANT).extractions.verify({ target: "analysis", reportId: DOC_ID }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(verify.startVerify).not.toHaveBeenCalled();
   });
 });

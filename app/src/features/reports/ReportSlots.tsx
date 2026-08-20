@@ -1,13 +1,25 @@
 // app/src/features/reports/ReportSlots.tsx
 //
-// §5.2 — the prose slots, editable. Saving a slot sets `edited: true` on the
-// server (the mutation MEANS edited; the flag is not an input), and the badge
-// here is what tells a user that regeneration will now leave this text alone.
+// §5.2 — the prose slots, editable and regenerable.
 //
-// The analysis hop that FILLS these arrives with #10. Until then the slots are
-// empty and the draft renders a visible placeholder in their place, which is
-// exactly how the authoring loop was meant to work: the shell is reviewable
-// before any prose exists.
+// THREE FACTS THIS COMPONENT HAS TO MAKE VISIBLE, because each one changes
+// what the next click does:
+//
+//   editado por pessoa   — regeneration will SKIP this slot. Pressing
+//                          [Regerar] on it therefore asks first: that is
+//                          §5.2's "regerar mesmo assim", and it is per slot.
+//                          Saving a text is what sets the flag (the mutation
+//                          MEANS edited; it is not an input the client sends).
+//   guarda numérica      — §12.12c. The prose contains a numeral with no
+//                          deterministic source. ADVISORY here; publication
+//                          recomputes the guard and refuses.
+//   contestado           — §12.13. A second model would not confirm a claim.
+//                          BLOCKING at publish, and the only way out is to
+//                          rewrite the slot (which retires the verdict along
+//                          with the prose it judged) or verify again.
+//
+// Austere on purpose: this screen exists to exercise the lifecycle, not to be
+// the finished reports UX.
 
 import { useState, type ReactElement } from "react";
 import { toast } from "sonner";
@@ -23,12 +35,16 @@ function SlotEditor({
   reportId,
   slot,
   frozen,
+  busy,
   onSaved,
+  onRegenerate,
 }: {
   reportId: string;
   slot: Slot;
   frozen: boolean;
+  busy: boolean;
   onSaved: () => void;
+  onRegenerate: (slug: string, wasEdited: boolean) => void;
 }): ReactElement {
   const [text, setText] = useState(slot.text ?? "");
   const save = trpc.reports.updateSlot.useMutation({
@@ -47,11 +63,35 @@ function SlotEditor({
         <span className="font-mono text-[length:var(--fs-body-sm)]">{slot.slug}</span>
         {slot.edited && <Badge variant="secondary">editado por pessoa</Badge>}
         {slot.text === null && <Badge variant="outline">ainda sem texto</Badge>}
+        {slot.numeralFlags.length > 0 && (
+          <Badge variant="outline" className="text-[color:var(--negative)]">
+            guarda numérica: {slot.numeralFlags.join(", ")}
+          </Badge>
+        )}
+        {slot.refuted.length > 0 && (
+          <Badge variant="outline" className="text-[color:var(--negative)]">
+            contestado: {String(slot.refuted.length)}
+          </Badge>
+        )}
+        {slot.refuted.length === 0 && slot.verifiedAt !== null && (
+          <Badge variant="secondary">verificado</Badge>
+        )}
       </div>
       {slot.guideline.length > 0 && (
         <p className="max-w-prose text-[length:var(--fs-body-sm)] italic text-[color:var(--ink-mute)]">
           {slot.guideline}
         </p>
+      )}
+      {slot.refuted.length > 0 && (
+        // The verifier NEVER rewrites (§12.13) — this is what it SAW, for a
+        // person to resolve. Editing the slot clears it.
+        <ul className="max-w-prose list-disc pl-5 text-[length:var(--fs-body-sm)] text-[color:var(--negative)]">
+          {slot.refuted.map((claim, i) => (
+            <li key={`${slot.slug}-refuted-${String(i)}`}>
+              “{claim.claim}” — {claim.fundamento ?? "sem fundamento registrado"}
+            </li>
+          ))}
+        </ul>
       )}
       <Textarea
         value={text}
@@ -62,7 +102,7 @@ function SlotEditor({
         }}
       />
       {!frozen && (
-        <div>
+        <div className="flex gap-2">
           <Button
             type="button"
             variant="outline"
@@ -74,6 +114,17 @@ function SlotEditor({
           >
             Salvar texto
           </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={busy}
+            onClick={() => {
+              onRegenerate(slot.slug, slot.edited);
+            }}
+          >
+            Regerar
+          </Button>
         </div>
       )}
     </div>
@@ -84,12 +135,16 @@ export function ReportSlots({
   reportId,
   slots,
   frozen,
+  busy,
   onSaved,
+  onRegenerate,
 }: {
   reportId: string;
   slots: readonly Slot[];
   frozen: boolean;
+  busy: boolean;
   onSaved: () => void;
+  onRegenerate: (slug: string, wasEdited: boolean) => void;
 }): ReactElement {
   if (slots.length === 0) {
     return (
@@ -108,7 +163,9 @@ export function ReportSlots({
           reportId={reportId}
           slot={slot}
           frozen={frozen}
+          busy={busy}
           onSaved={onSaved}
+          onRegenerate={onRegenerate}
         />
       ))}
     </div>

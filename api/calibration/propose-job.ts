@@ -28,18 +28,35 @@
 // and simply drops the rest — so the relay never has to learn the word.
 
 import { FIELD_TYPES, INPUT_MODES, LEAF_FIELD_TYPES } from "../../shared/validation/field-spec";
+import { billingBinding } from "../billing/charge";
 
 /** The marker that distinguishes a Calibrate proposal from a report analysis
  * on an otherwise identical `analyse` job row. */
 export const CALIBRATE_PURPOSE = "calibrate";
 
-/** Only adapter registered today (relay/src/providers/registry.ts). The
- * FLASH tier, not flash-lite: this hop reads a whole document and has to
+/**
+ * §12.6's charge key for this hop, minus the grammar
+ * (api/billing/charge.ts `chargeRefId` owns that):
+ *
+ *     report_analysis:{provider}:{model}:calibrate:{s3Key}
+ *
+ * BILLED AS `analyse`, because that is the `kind` the job actually rides and
+ * `ai_charges.source` is documented in terms of the hop that spent the credit
+ * (drizzle/tables/billing.ts). The `calibrate:` segment keeps it from ever
+ * colliding with a report analysis, whose key is
+ * `{templateVersionId}:{extractionIds}` — different grammar, same prefix,
+ * no ambiguity.
+ *
+ * The model/provider are ARGUMENTS now (#10) — the FLASH-tier default lives in
+ * api/services/credentials-service.ts (`PLATFORM_DEFAULTS.calibrate`), with
+ * the reason it is not flash-lite: this hop reads a whole document and has to
  * invent a field list from it, which is the one Calibrate call a tenant makes
- * per document type — the cheapest possible model is a false economy against
- * a list a human then has to repair by hand. */
-export const CALIBRATE_PROVIDER = "gemini";
-export const CALIBRATE_MODEL = "gemini-3.5-flash";
+ * per document type, and the cheapest possible model is a false economy
+ * against a list a human then has to repair by hand.
+ */
+export function calibrateRefKey(s3Key: string): string {
+  return `calibrate:${s3Key}`;
+}
 
 /** Room for ~40 fields with descriptions plus the sample values. Well under
  * `MAX_MAX_TOKENS`; a proposal that needs more than this is a document type
@@ -136,6 +153,10 @@ export interface CalibrateJobInput {
   readonly s3Key: string;
   readonly providerName?: string | undefined;
   readonly documentTypeName?: string | undefined;
+  readonly provider: string;
+  readonly model: string;
+  /** §7 — present only for BYOK. */
+  readonly ssmParamName?: string | undefined;
   /**
    * Page-1 text, extracted LOCALLY before this job was built
    * (api/detection/page-text.ts), or null when the PDF has no text layer.
@@ -206,13 +227,15 @@ export function buildCalibrateJob(input: CalibrateJobInput): Record<string, unkn
     kind: "analyse",
     purpose: CALIBRATE_PURPOSE,
     tenantId: input.tenantId,
-    provider: CALIBRATE_PROVIDER,
-    model: CALIBRATE_MODEL,
+    provider: input.provider,
+    model: input.model,
     system: SYSTEM_PROMPT,
     prompt: buildPrompt(input),
     document: { s3Key: input.s3Key },
     schema: buildProposalSchema(),
     maxTokens: CALIBRATE_MAX_TOKENS,
+    ...(input.ssmParamName === undefined ? {} : { ssmParamName: input.ssmParamName }),
+    ...billingBinding({ source: "analyse", refKey: calibrateRefKey(input.s3Key) }),
   };
 }
 

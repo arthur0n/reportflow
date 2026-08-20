@@ -33,6 +33,22 @@ const relay = vi.hoisted(() => ({
 }));
 vi.mock("../lib/relay", () => relay);
 
+// §6/§7's resolution is proven in credentials-service.test.ts. Stubbed here so
+// the queued reads below stay a statement about the EXTRACTION path.
+const credentials = vi.hoisted(() => ({
+  resolveModel: vi.fn(),
+  keyBinding: vi.fn(() => ({})),
+}));
+vi.mock("./credentials-service", () => credentials);
+
+// §12.13's badge is a read on a different job row; proven in
+// verify-service.test.ts.
+const verify = vi.hoisted(() => ({
+  loadLatestVerifyJobForDocument: vi.fn(),
+  readExtractionVerify: vi.fn(() => ({ view: { state: "nenhum" }, verdicts: [] })),
+}));
+vi.mock("./verify-service", () => verify);
+
 const { startExtraction, correctExtraction, getExtractionView } =
   await import("./extraction-service");
 
@@ -133,6 +149,14 @@ const enqueue = vi.fn().mockResolvedValue(undefined);
 const fetchPdf = vi.fn();
 
 beforeEach(() => {
+  credentials.resolveModel
+    .mockReset()
+    .mockResolvedValue({ provider: "gemini", model: "gemini-3.5-flash", byok: null });
+  credentials.keyBinding.mockReset().mockReturnValue({});
+  verify.loadLatestVerifyJobForDocument.mockReset().mockResolvedValue(undefined);
+  verify.readExtractionVerify
+    .mockReset()
+    .mockReturnValue({ view: { state: "nenhum" }, verdicts: [] });
   store.loadTemplateFields.mockReset().mockResolvedValue(FIELDS);
   jobState.loadLatestJobForDocument.mockReset().mockResolvedValue(undefined);
   jobState.resolveRevisarJob.mockReset().mockResolvedValue(1);

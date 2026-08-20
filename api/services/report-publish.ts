@@ -10,6 +10,7 @@
 //   1. required roles filled          -> else "aguardando: contrato" (§3.2)
 //   2. every declared slot has prose  -> a placeholder is not a report
 //   3. NUMERAL GUARD on every slot    -> §12.12c, blocks publication
+//   3b. NO REFUTED CLAIMS on any slot -> §12.13, blocks publication
 //   4. render                         -> the §12.4 engine, escaping on
 //   5. PUT the HTML to a PER-ATTEMPT key -> before the row is stamped
 //   6. compare-and-set frozen_at         -> WHERE frozen_at IS NULL, stamping
@@ -44,9 +45,8 @@ import type { DbLike } from "../collector/job-state";
 import { withSystemFields } from "../db/scope";
 import { renderTemplate } from "../render/handlebars";
 import { auditSlots, harvestNumerals } from "../render/numeral-guard";
-import { buildReportContext, todayInSaoPaulo } from "../render/report-context";
-import { slotTexts } from "../render/report-content";
-import { bindingsOf, loadReportBundle, type ReportBundle } from "./report-service";
+import { refutedSlots, slotTexts } from "../render/report-content";
+import { loadReportBundle, reportContextOf } from "./report-service";
 import { slotPlaceholder } from "./outbound-template-service";
 
 export interface PublishDeps {
@@ -64,31 +64,10 @@ export interface PublishCtx {
   readonly userId: string;
 }
 
-function metaFor(bundle: ReportBundle): {
-  titulo: string;
-  cliente: string | null;
-  emissao: string;
-  n_documentos: number;
-} {
-  let n = 0;
-  for (const list of bundle.attached.values()) {
-    n += list.length;
-  }
-  return {
-    titulo: bundle.report.title ?? "Relatório",
-    cliente: bundle.clientName,
-    emissao: todayInSaoPaulo(),
-    n_documentos: n,
-  };
-}
-
-function contextFor(bundle: ReportBundle): ReturnType<typeof buildReportContext> {
-  return buildReportContext({
-    roles: bundle.roles,
-    bindings: bindingsOf(bundle),
-    meta: metaFor(bundle),
-  });
-}
+/** §12.12b's context, built by the ONE builder every hop shares
+ * (api/services/report-service.ts `reportContextOf`) — see the comment there
+ * on why a second one would make the §12.13 verifier lie. */
+const contextFor = reportContextOf;
 
 // ---------------------------------------------------------------------------
 // render — one procedure, two sources
@@ -105,6 +84,9 @@ export type RenderedReport =
        * a bad numeral would hide the very prose a human has to fix. */
       readonly numeralViolations: readonly { slot: string; token: string }[];
       readonly missingSlots: readonly string[];
+      /** §12.13 — slots the verifier would not confirm. Same policy as the
+       * numerals: shown here, refused at publish. */
+      readonly contestedSlots: readonly string[];
     }
   | {
       readonly status: "publicado";
@@ -165,6 +147,7 @@ export async function renderReport(
     html,
     numeralViolations: auditSlots(texts, harvestNumerals(built.context)),
     missingSlots,
+    contestedSlots: refutedSlots(bundle.content).map((s) => s.slug),
   };
 }
 
@@ -238,6 +221,36 @@ export async function publishReport(
       message:
         `A prosa contém números sem fonte determinística e não pode ser publicada — ${detail}. ` +
         `Corrija o texto ou regenere a análise (§12.12).`,
+    });
+  }
+
+  // §12.13. THE SECOND HARD GATE, and the one nothing downstream can
+  // recompute: a refutation is another model's reading of this prose, not a
+  // function of the data, so unlike the numeral guard above there is no way to
+  // re-derive it at publish time. It is therefore read from `content_json`,
+  // where the collector wrote it (api/collector/collect.ts).
+  //
+  // THE VERIFIER NEVER REWRITES (§12.13), so the only things that clear a
+  // refutation are a human editing the slot — which retires the very prose the
+  // verdict was about (api/render/report-content.ts) — or a fresh verify pass
+  // that confirms it. Without that first rule this gate would be a report
+  // wedged shut with no exit that did not involve a database.
+  const contested = refutedSlots(bundle.content);
+  if (contested.length > 0) {
+    const detail = contested
+      .map((slot) => {
+        const first = slot.claims[0];
+        const reason = first?.fundamento ?? first?.claim ?? "sem fundamento registrado";
+        const more = slot.claims.length > 1 ? ` (+${String(slot.claims.length - 1)})` : "";
+        return `slot "${slot.slug}": ${reason}${more}`;
+      })
+      .join("; ");
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message:
+        `A verificação adversarial contestou afirmações na prosa e o relatório não pode ser ` +
+        `publicado — ${detail}. Corrija o texto do slot (isso limpa a contestação) ou ` +
+        `verifique novamente (§12.13).`,
     });
   }
 

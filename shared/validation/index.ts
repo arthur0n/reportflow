@@ -115,6 +115,8 @@ export {
   RoleOptionsInput,
   UpdateSlotInput,
   UpgradeReportVersionInput,
+  StartAnalysisInput,
+  StartVerifyInput,
 } from "./report-schemas";
 export type {
   CreateReportInputT,
@@ -124,4 +126,24 @@ export type {
   RoleOptionsInputT,
   UpdateSlotInputT,
   UpgradeReportVersionInputT,
+  StartAnalysisInputT,
+  StartVerifyInputT,
 } from "./report-schemas";
+
+export {
+  VERDICTS,
+  VerdictZ,
+  FieldVerdictZ,
+  ClaimVerdictZ,
+  ExtractionVerdictsZ,
+  AnalysisVerdictsZ,
+  tallyVerdicts,
+} from "./verify-schemas";
+export type {
+  Verdict,
+  FieldVerdictT,
+  ClaimVerdictT,
+  ExtractionVerdictsT,
+  AnalysisVerdictsT,
+  VerdictTally,
+} from "./verify-schemas";

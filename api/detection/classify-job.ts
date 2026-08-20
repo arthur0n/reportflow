@@ -11,15 +11,15 @@
 // which includes the scanned-with-no-text-layer case, so a job built here
 // must not assume page text exists.
 //
-// Provider/model are fixed constants rather than read from `ai_credentials`
-// on purpose: that table's BYOK resolution (§7, §12.7) is a billing concern
-// this ticket does not wire up (§4.2/§12.1's collector treats `detect` as
-// "the result IS the artifact" with no charge recorded yet — there is
-// nothing here to attribute a customer key to). Swapping to a per-tenant
-// choice later is a change to `resolveDetectModel` alone.
+// Provider/model are ARGUMENTS, not constants (#10). §6 puts model choice at
+// the account level and this hop is the trivial one — the platform default
+// lives in api/services/credentials-service.ts (`PLATFORM_DEFAULTS.detect`),
+// which is also where BYOK key ownership is resolved (§7, §12.7). This file
+// does not know whose key pays and has no reason to.
 
 import { eq, and, isNull } from "drizzle-orm";
 import { documentTypes, extractTemplates, providers } from "../../drizzle/schema";
+import { billingBinding } from "../billing/charge";
 import type { DbLike } from "../collector/job-state";
 
 /** A document type the model may pick from, plus the tier-1 hints (if any) —
@@ -125,11 +125,21 @@ function buildSchema(types: readonly ClassifiableType[]): Record<string, unknown
  * no room for a classification hop to run away). */
 const DETECT_MAX_TOKENS = 256;
 
-/** Only adapter registered today (relay/src/providers/registry.ts). A
- * classification hop is the cheapest possible use of it — flash-lite, not
- * the flash tier `extract_templates` may use for the extraction itself. */
-export const DETECT_PROVIDER = "gemini";
-export const DETECT_MODEL = "gemini-3.5-flash-lite";
+/**
+ * §12.6's charge key for this hop, minus the grammar
+ * (api/billing/charge.ts `chargeRefId` owns that):
+ *
+ *     report_detect:{provider}:{model}:{s3Key}
+ *
+ * §7 named three prefixes and not this one. It gets the same grammar for the
+ * same reason the others have it: a hop that runs is a hop that is billed, and
+ * one keyed on the document means classifying the same PDF twice — which is
+ * what a stale `detect_hint` and a corrected dropdown both cause — costs the
+ * customer once.
+ */
+export function detectRefKey(s3Key: string): string {
+  return s3Key;
+}
 
 export interface DetectJobInput {
   readonly tenantId: string;
@@ -137,6 +147,10 @@ export interface DetectJobInput {
    * the same way every other hop does; there is no separate upload here. */
   readonly s3Key: string;
   readonly types: readonly ClassifiableType[];
+  readonly provider: string;
+  readonly model: string;
+  /** §7 — present only for BYOK. */
+  readonly ssmParamName?: string | undefined;
 }
 
 export interface DetectJobBuild {
@@ -166,13 +180,15 @@ export function buildDetectJob(input: DetectJobInput): DetectJobBuild {
     channel: "ai",
     kind: "detect",
     tenantId: input.tenantId,
-    provider: DETECT_PROVIDER,
-    model: DETECT_MODEL,
+    provider: input.provider,
+    model: input.model,
     system: SYSTEM_PROMPT,
     prompt: buildPrompt(input.types),
     document: { s3Key: input.s3Key },
     schema: buildSchema(input.types),
     maxTokens: DETECT_MAX_TOKENS,
+    ...(input.ssmParamName === undefined ? {} : { ssmParamName: input.ssmParamName }),
+    ...billingBinding({ source: "detect", refKey: detectRefKey(input.s3Key) }),
   };
 
   return { payload, labelToDocumentTypeId };

@@ -13,14 +13,12 @@
 
 import { describe, it, expect } from "vitest";
 import type { FieldSpec } from "../../shared/validation/field-spec";
-import {
-  buildExtractJob,
-  extractionRefId,
-  EXTRACT_MODEL,
-  EXTRACT_PROVIDER,
-  readExtractContext,
-  resolveExtractionModel,
-} from "./extract-job";
+import { chargeRefId } from "../billing/charge";
+import { PLATFORM_DEFAULTS } from "../services/credentials-service";
+import { buildExtractJob, extractionRefKey, readExtractContext } from "./extract-job";
+
+const EXTRACT_PROVIDER = PLATFORM_DEFAULTS.extract.provider;
+const EXTRACT_MODEL = PLATFORM_DEFAULTS.extract.model;
 
 const TENANT = "org_2abcTENANT";
 const S3_KEY = `${TENANT}/doc.pdf`;
@@ -125,24 +123,40 @@ describe("§12.6 — the charge key", () => {
   // "Model names are not globally unique across providers", which is exactly
   // why the provider is in the key and not just the model.
   it("names provider, model and s3Key", () => {
-    expect(extractionRefId("gemini", "gemini-3.5-flash", S3_KEY)).toBe(
+    expect(chargeRefId("extract", "gemini", "gemini-3.5-flash", extractionRefKey(S3_KEY))).toBe(
       `report_extraction:gemini:gemini-3.5-flash:${S3_KEY}`,
     );
   });
 
   it("distinguishes the same model name under two providers", () => {
-    expect(extractionRefId("a", "m", S3_KEY)).not.toBe(extractionRefId("b", "m", S3_KEY));
+    const key = extractionRefKey(S3_KEY);
+    expect(chargeRefId("extract", "a", "m", key)).not.toBe(chargeRefId("extract", "b", "m", key));
   });
-});
 
-describe("resolveExtractionModel", () => {
-  // §6's per-hop model scope, still a constant until #10 wires ai_credentials.
-  // Pinned so the swap is a deliberate edit rather than a drift.
-  it("returns the extract-hop default", () => {
-    expect(resolveExtractionModel(TENANT)).toEqual({
-      provider: EXTRACT_PROVIDER,
-      model: EXTRACT_MODEL,
+  // §7 keys the charge on the ARTIFACT: "re-reading the same PDF must not bill
+  // twice, which is exactly what a user does when a read looks wrong". So the
+  // retry §4.2 allows must land on the SAME ref_id as the first attempt.
+  it("is the same key for every attempt at the same document", () => {
+    expect(extractionRefKey(S3_KEY)).toBe(extractionRefKey(S3_KEY));
+  });
+
+  // The binding rides the payload so the collector — which never sees the
+  // service that built the job — can name the charge without re-deriving it.
+  it("rides the job payload", () => {
+    expect(buildExtractJob(base())["billing"]).toEqual({
+      source: "extract",
+      refKey: S3_KEY,
     });
+  });
+
+  // §7/§12.7 — BYOK is a parameter NAME on the payload, never a key, and its
+  // presence is also how the collector learns that raw = owed = 0.
+  it("carries ssmParamName only for BYOK", () => {
+    expect(buildExtractJob(base())["ssmParamName"]).toBeUndefined();
+    const byok = buildExtractJob(
+      base({ ssmParamName: `/reportflow/tenants/${TENANT}/gemini-api-key` }),
+    );
+    expect(byok["ssmParamName"]).toBe(`/reportflow/tenants/${TENANT}/gemini-api-key`);
   });
 });
 

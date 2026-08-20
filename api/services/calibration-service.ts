@@ -40,6 +40,7 @@ import { parseModelJson } from "../collector/relay-result";
 import { extractPageOneText } from "../detection/page-text";
 import { buildCalibrateJob, isCalibrateRequest } from "../calibration/propose-job";
 import { jobKeyFor, mintJobId } from "../lib/relay";
+import { keyBinding, resolveModel } from "./credentials-service";
 import { buildFieldTree, type FieldSpec, type InputMode } from "../../shared/validation/field-spec";
 import {
   CalibrationProposalZ,
@@ -145,12 +146,18 @@ export async function proposeCalibration(
   const bytes = await deps.fetchPdf(doc.s3Key);
   const pageOneText = bytes === null ? null : await extractPageOneText(bytes);
 
+  // §6/§7 — the account's model and whose key pays (§10.5 refuses an unpriced
+  // platform-key hop here, before any money is spent).
+  const resolved = await resolveModel(deps.db, ctx.tenantId, "calibrate");
   const payload = buildCalibrateJob({
     tenantId: ctx.tenantId,
     s3Key: doc.s3Key,
     providerName,
     documentTypeName: input.documentTypeName,
     pageOneText,
+    provider: resolved.provider,
+    model: resolved.model,
+    ...keyBinding(resolved),
   });
 
   const jobId = mintJobId();

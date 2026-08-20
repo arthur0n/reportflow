@@ -33,6 +33,15 @@ vi.mock("../../services/report-service", () => service);
 const publish = vi.hoisted(() => ({ publishReport: vi.fn(), renderReport: vi.fn() }));
 vi.mock("../../services/report-publish", () => publish);
 
+const analysis = vi.hoisted(() => ({ startAnalysis: vi.fn() }));
+vi.mock("../../services/analysis-service", () => analysis);
+
+const verify = vi.hoisted(() => ({ startVerify: vi.fn() }));
+vi.mock("../../services/verify-service", () => verify);
+
+const relay = vi.hoisted(() => ({ enqueueRelayJob: vi.fn() }));
+vi.mock("../../lib/relay", () => relay);
+
 const storage = vi.hoisted(() => ({
   frozenReportKey: vi.fn(),
   getFrozenReport: vi.fn(),
@@ -172,5 +181,47 @@ describe("reports.render / publish", () => {
     await expect(anon.reports.publish({ reportId: REPORT_ID })).rejects.toMatchObject({
       code: "UNAUTHORIZED",
     });
+  });
+});
+
+describe("reports.startAnalysis / verify", () => {
+  it("hands the analysis path the real outbox writer, under the caller's tenant", async () => {
+    analysis.startAnalysis.mockResolvedValue({ jobId: "j", slugs: ["parecer"], forced: [] });
+    await callerFor(TENANT).reports.startAnalysis({ reportId: REPORT_ID });
+    expect(analysis.startAnalysis).toHaveBeenCalledWith(
+      { db: dbClient.db, enqueue: relay.enqueueRelayJob },
+      { tenantId: TENANT, userId: USER },
+      { reportId: REPORT_ID },
+    );
+  });
+
+  // §5.2 — naming a slug IS "regerar mesmo assim", so the list has to reach
+  // the service intact; dropping it silently turns an override into a no-op.
+  it("passes the explicit slug list through", async () => {
+    analysis.startAnalysis.mockResolvedValue({ jobId: "j", slugs: ["riscos"], forced: ["riscos"] });
+    await callerFor(TENANT).reports.startAnalysis({ reportId: REPORT_ID, slugs: ["riscos"] });
+    expect(analysis.startAnalysis).toHaveBeenCalledWith(expect.anything(), expect.anything(), {
+      reportId: REPORT_ID,
+      slugs: ["riscos"],
+    });
+  });
+
+  it("refuses a slug that is not a valid identifier before any service runs", async () => {
+    await expect(
+      callerFor(TENANT).reports.startAnalysis({ reportId: REPORT_ID, slugs: ["Não Válido"] }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(analysis.startAnalysis).not.toHaveBeenCalled();
+  });
+
+  // §12.13 — this router only ever verifies the ANALYSIS half; the extraction
+  // half is enqueued from extractions.router.ts, against a different id.
+  it("verifies the analysis half, naming the report", async () => {
+    verify.startVerify.mockResolvedValue({ jobId: "j", target: "analysis" });
+    await callerFor(TENANT).reports.verify({ reportId: REPORT_ID });
+    expect(verify.startVerify).toHaveBeenCalledWith(
+      { db: dbClient.db, enqueue: relay.enqueueRelayJob },
+      { tenantId: TENANT, userId: USER },
+      { target: "analysis", reportId: REPORT_ID },
+    );
   });
 });

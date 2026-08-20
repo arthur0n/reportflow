@@ -38,22 +38,13 @@ import {
   type FieldSpec,
 } from "../../shared/validation";
 import type { InputMode } from "../../shared/validation/field-spec";
+import { billingBinding } from "../billing/charge";
 
-/**
- * The model that reads documents.
- *
- * §6 puts model choice at the ACCOUNT level, overridable per hop — and
- * extraction is the accuracy-critical hop, so it does not share detection's
- * flash-lite tier. Today this is a constant for the same reason
- * `DETECT_MODEL` is (api/detection/classify-job.ts): the per-tenant
- * resolution reads `ai_credentials`, whose BYOK fork (§7, §12.7) is a billing
- * concern that lands with the charge rows in #10. When it does, only
- * `resolveExtractionModel` below changes.
- */
-export const EXTRACT_PROVIDER = "gemini";
-/** Matches `MODEL_EXTRACT` in poc/lib/ai.ts — the tier the POC's corpus was
- * actually validated against. */
-export const EXTRACT_MODEL = "gemini-3.5-flash";
+// Model choice for this hop now lives in api/services/credentials-service.ts
+// (`PLATFORM_DEFAULTS.extract`, §6's "account-level default, settable per
+// hop") — #10 replaced the constants that used to sit here, together with the
+// TODO that pointed at it. This file is handed a (provider, model) pair and a
+// key binding; it does not know or care whose key pays.
 
 /** Room for a long line-item table plus the wrapper. §6.2 budgets ~2k output
  * tokens for this hop; 8192 is the POC's own ceiling and leaves headroom for a
@@ -72,33 +63,19 @@ export const EXTRACT_MAX_TOKENS = 8_192;
 export const DOCUMENT_TEXT_BUDGET = 180_000;
 
 /**
- * Per-tenant model resolution, §6's "account-level default, settable per hop".
+ * §12.6's charge key for this hop, minus the grammar
+ * (api/billing/charge.ts `chargeRefId` owns that):
  *
- * TODO(#10): read `ai_credentials` for this tenant and return its configured
- * (provider, model) for the extract hop, falling back to these constants. The
- * signature already takes the tenant so the call sites do not change when it
- * does; the charge row §12.6 describes is written by the same ticket, and both
- * need the same fact — WHOSE key paid.
- */
-export function resolveExtractionModel(_tenantId: string): {
-  readonly provider: string;
-  readonly model: string;
-} {
-  return { provider: EXTRACT_PROVIDER, model: EXTRACT_MODEL };
-}
-
-/**
- * §12.6's charge idempotency key for this hop — provider included, because
- * "model names are not globally unique across providers".
+ *     report_extraction:{provider}:{model}:{s3Key}
  *
- * Written here rather than in the billing module so that the ONE place that
- * knows which (provider, model, document) a job was built for is the place
- * that names the charge. #10 wires it to `ai_charges.ref_id` (UNIQUE, which is
- * the whole idempotency story); until then it exists so that the job builder
- * and the charge writer cannot disagree about the key.
+ * The S3 key and nothing else, which is §7's own sentence made literal: the
+ * charge is idempotent on the ARTIFACT, not the job — "re-reading the same PDF
+ * must not bill twice, which is exactly what a user does when a read looks
+ * wrong". The retry §4.2 allows therefore costs the platform a second provider
+ * call and the customer nothing, which is the point.
  */
-export function extractionRefId(provider: string, model: string, s3Key: string): string {
-  return `report_extraction:${provider}:${model}:${s3Key}`;
+export function extractionRefKey(s3Key: string): string {
+  return s3Key;
 }
 
 const SYSTEM_PROMPT = [
@@ -162,7 +139,7 @@ export const RECALIBRATED_DURING_EXTRACTION = "template recalibrado durante a ex
 export interface ExtractJobInput {
   readonly tenantId: string;
   /** The document's own S3 key — the handle every hop uses. Carried even in
-   * `text` mode: it is what `extractionRefId` keys the charge on (§12.6). */
+   * `text` mode: it is what `extractionRefKey` keys the charge on (§12.6). */
   readonly s3Key: string;
   readonly inputMode: InputMode;
   /** The live extract template's id at enqueue time — half of the staleness
@@ -180,6 +157,10 @@ export interface ExtractJobInput {
   readonly documentText: string | null;
   readonly provider: string;
   readonly model: string;
+  /** §7 — present only for BYOK. The relay reads it and independently
+   * re-derives the only path this tenant may name (§12.7); api/billing/charge.ts
+   * reads it back off the stored payload to know whose key paid. */
+  readonly ssmParamName?: string | undefined;
   /** Shown to the model as context, exactly as the POC did
    * (`Documento: {provider} / {documentType}`). */
   readonly providerName?: string | undefined;
@@ -245,6 +226,8 @@ export function buildExtractJob(input: ExtractJobInput): Record<string, unknown>
     ...(input.inputMode === "vision" ? { document: { s3Key: input.s3Key } } : {}),
     schema: fieldsToJsonSchema(input.fields),
     maxTokens: EXTRACT_MAX_TOKENS,
+    ...(input.ssmParamName === undefined ? {} : { ssmParamName: input.ssmParamName }),
+    ...billingBinding({ source: "extract", refKey: extractionRefKey(input.s3Key) }),
     // Not read by the relay; read by the collector off `report_jobs.request`.
     [EXTRACT_CONTEXT_KEY]: {
       templateId: input.templateId,

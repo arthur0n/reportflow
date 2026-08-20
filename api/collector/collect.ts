@@ -39,12 +39,51 @@
 // shared/validation/extraction-validation.ts, built at runtime from the frozen
 // list, and the repair screen runs the identical function.
 //
+// WHAT THIS FILE ALSO DOES NOW (2026-08-20, issue #10), and why it is here
+// rather than anywhere else:
+//
+//   * IT WRITES THE CHARGE ROW (§7, §12.6). A hop is billable the moment the
+//     provider answered, and this is the only place that learns that fact for
+//     every hop and every ingress path at once. Billing anywhere upstream
+//     would bill for asking; billing in four service files would be four
+//     idempotencies, which is the mistake §4.1 spends a paragraph forbidding.
+//   * IT MERGES AN ANALYSIS INTO A DRAFT (§5.2) and PERSISTS A VERIFIER'S
+//     VERDICTS (§12.13) — the two results that are not self-contained
+//     artifacts. Both go through api/collector/report-content-store.ts.
+//
+// THE ORDER OF THE THREE WRITES IS THE IDEMPOTENCY, and it is the same order,
+// for the same reason, as the extraction cache below: CHARGE, then ARTIFACT,
+// then STATUS. Every one of the first two is idempotent on its own key
+// (`ai_charges.ref_id` UNIQUE; `extractions(s3_key, calibration_rev)`; a slot
+// merge that re-applies the same answer), and the status flip is the
+// compare-and-set that makes the whole thing at-most-once observable. If the
+// process dies at any point the row is still `pending`, the next delivery
+// re-runs the path, and nothing is lost or duplicated. A transaction spanning
+// all three would be tidier on paper and cannot be had here: `DbLike` is a
+// pool OR a transaction handle, both real callers hand in the pool, and the
+// unit tests hand in a fake — so the guarantee is bought with ON CONFLICT,
+// which is what buys it in every other write on this path already.
+//
 // WHAT THIS FILE STILL WILL NOT DO. It does not compute the §12.12(a)
 // arithmetic guardrails (those need a template-DECLARED relationship list that
-// does not exist yet — #10/#12), does not read a verifier's verdicts (§12.13),
-// and does not write charge rows (§12.6/#10). It moves bytes, decides the
-// job's fate, and stops.
+// does not exist yet — #12). It moves bytes, decides the job's fate, and stops.
 
+import {
+  chargeRefId,
+  readBillingBinding,
+  readByok,
+  readUsage,
+  UnpricedModelError,
+  writeCharge,
+} from "../billing/charge";
+import { readAnalysisContext } from "../analysis/analyse-job";
+import { readVerifyContext } from "../analysis/verify-job";
+import {
+  applyAnalysisVerdicts,
+  mergeAnalysisSlots,
+  VERDICT_OBSOLETE,
+} from "./report-content-store";
+import { AnalysisVerdictsZ, ExtractionVerdictsZ } from "../../shared/validation/verify-schemas";
 import { jobKeyFor, nextAttemptJobId, parseJobId, type JobIdParts } from "../lib/relay";
 import { insertExtractionIdempotent, resolveExtractionTarget } from "./extraction-store";
 import { RECALIBRATED_DURING_EXTRACTION, readExtractContext } from "../extraction/extract-job";
@@ -434,17 +473,239 @@ async function applyExtractSuccess(
   return settle(deps, ctx, "done", null);
 }
 
-/** detect / analyse / verify: the result IS the artifact, and it is already on
- * its way into `report_jobs.result` via the transition's patch. The collector
- * does not read verdicts or slots — that is the orchestration's job (§12.13). */
+/**
+ * A REPORT ANALYSIS (§5.2, §12.12c): merge the prose into `content_json`.
+ *
+ * NOT every `analyse` job comes here. That kind is shared with Calibrate
+ * (api/calibration/propose-job.ts), whose result IS its artifact and is read
+ * on demand off `report_jobs.result`. `readAnalysisContext` returns null for
+ * one of those and for anything else this code did not build, and the caller
+ * falls back to the pre-#10 behaviour: settle `done`, write nothing into
+ * anybody's draft.
+ *
+ * A GUARD VIOLATION IS NOT A FAILURE HERE. See the long note in
+ * api/collector/report-content-store.ts `mergeAnalysisSlots`: the prose is
+ * stored with its offending numerals flagged, publication recomputes the guard
+ * and refuses (§12.12c), and the human gets to read the text they have to fix.
+ * `analyse`'s terminal failure is `failed` — there is no per-slot repair
+ * screen to send them to, so failing the job would leave a red badge and
+ * nothing else.
+ *
+ * The ONE thing that does fail the job is an answer with no usable slot in it
+ * at all: nothing was written, so `done` would be a lie.
+ */
+async function applyAnalyseSuccess(
+  deps: CollectDeps,
+  ctx: JobContext,
+  success: RelaySuccess,
+): Promise<CollectOutcome> {
+  const context = readAnalysisContext(ctx.row.request);
+  if (context === null) {
+    // A Calibrate proposal, or a job from before this binding existed.
+    return settle(deps, ctx, "done", null);
+  }
+  const parsed = parseModelJson(success.content);
+  if (!parsed.ok) {
+    // Same road as a relay failure, same ceiling — §4.2's "most schema
+    // violations are transient" applies to a prose hop exactly as it does to
+    // an extraction.
+    return applyFailure(deps, ctx, { kind: "failure", type: "transient", message: parsed.message });
+  }
+
+  const answers: Record<string, string> = {};
+  for (const [slug, value] of Object.entries(parsed.data)) {
+    if (typeof value === "string") {
+      answers[slug] = value;
+    }
+  }
+
+  const outcome = await mergeAnalysisSlots(deps.db, ctx.tenantId, context, answers);
+  if (!outcome.ok) {
+    return settle(deps, ctx, "failed", outcome.reason);
+  }
+  if (outcome.merged.length === 0 && outcome.preserved.length === 0) {
+    return applyFailure(deps, ctx, {
+      kind: "failure",
+      type: "transient",
+      message: `nenhum slot utilizável na resposta${outcome.rejected.length > 0 ? `: ${outcome.rejected.join(", ")}` : ""}`,
+    });
+  }
+  return settle(deps, ctx, "done", noteFor(outcome.preserved, outcome.rejected));
+}
+
+/**
+ * The operator note a settled verify job carries.
+ *
+ * `obsolete` is on it because a verdict silently dropped is indistinguishable
+ * from a clean pass, and the fix a person needs ("verifique novamente") is not
+ * discoverable from a badge that says nothing.
+ */
+function verdictNote(flagged: readonly string[], obsolete: readonly string[]): string | null {
+  const parts: string[] = [];
+  if (flagged.length > 0) {
+    parts.push(`contestado: ${flagged.join(", ")}`);
+  }
+  if (obsolete.length > 0) {
+    parts.push(`${VERDICT_OBSOLETE}: ${obsolete.join(", ")}`);
+  }
+  return parts.length > 0 ? parts.join("; ").slice(0, 400) : null;
+}
+
+/** The operator note a settled analyse job carries. `null` when there is
+ * nothing worth saying — an empty `error` column is what `done` normally looks
+ * like, and filling it with "everything worked" would make a real note
+ * invisible. */
+function noteFor(preserved: readonly string[], rejected: readonly string[]): string | null {
+  const parts: string[] = [];
+  if (preserved.length > 0) {
+    parts.push(`preservados (editados por pessoa, §5.2): ${preserved.join(", ")}`);
+  }
+  if (rejected.length > 0) {
+    parts.push(`descartados (resposta inutilizável): ${rejected.join(", ")}`);
+  }
+  return parts.length > 0 ? parts.join("; ").slice(0, 400) : null;
+}
+
+/**
+ * A VERIFY result (§12.13).
+ *
+ * The verdicts are already on their way into `report_jobs.result` verbatim —
+ * that is the record, and the extraction screen reads it back for its badge.
+ * The ONE extra write is the analysis half: refuted claims are copied onto the
+ * slots they judged, because publication has to be able to refuse on them and
+ * a refutation is the one verdict nothing downstream can recompute
+ * (api/services/report-publish.ts).
+ *
+ * AN UNREADABLE VERDICT LIST IS `failed`, NOT A RETRY. The hop ran and was
+ * billed; a second call to the same model with the same prompt is §4.2's
+ * "permanent" case in everything but name, and the result is still in the
+ * bucket for anyone who wants to see what it said.
+ */
+async function applyVerifySuccess(
+  deps: CollectDeps,
+  ctx: JobContext,
+  success: RelaySuccess,
+): Promise<CollectOutcome> {
+  const context = readVerifyContext(ctx.row.request);
+  if (context === null) {
+    return settle(deps, ctx, "done", null);
+  }
+  const parsed = parseModelJson(success.content);
+  if (!parsed.ok) {
+    return settle(deps, ctx, "failed", `veredito ilegível: ${parsed.message}`);
+  }
+
+  if (context.target === "extraction") {
+    // Shape-checked so a badge never renders from a blob, and NOTHING is
+    // written to `extractions`: the verifier never rewrites (§12.13), and a
+    // stored verdict would go stale the moment a human repairs the extraction.
+    const shaped = ExtractionVerdictsZ.safeParse(parsed.data);
+    return shaped.success
+      ? settle(deps, ctx, "done", null)
+      : settle(deps, ctx, "failed", "veredito de extração fora do formato esperado");
+  }
+
+  const shaped = AnalysisVerdictsZ.safeParse(parsed.data);
+  if (!shaped.success) {
+    return settle(deps, ctx, "failed", "veredito de análise fora do formato esperado");
+  }
+  const outcome = await applyAnalysisVerdicts(
+    deps.db,
+    ctx.tenantId,
+    {
+      reportId: context.reportId,
+      templateVersionId: context.templateVersionId,
+      textHashes: context.textHashes,
+    },
+    shaped.data.verdicts,
+  );
+  if (!outcome.ok) {
+    return settle(deps, ctx, "failed", outcome.reason);
+  }
+  return settle(deps, ctx, "done", verdictNote(outcome.merged, outcome.obsolete));
+}
+
+/**
+ * §7's ledger write, for every hop, before any artifact is stored.
+ *
+ * FIRST, because the money is already spent the instant the relay wrote a
+ * success — and a crash between here and the status flip must leave a row that
+ * bills once, not one that bills zero. `ON CONFLICT (ref_id) DO NOTHING` is
+ * what makes "first" affordable: the redelivery that re-runs this whole path
+ * inserts nothing the second time.
+ *
+ * A MISSING BINDING WARNS AND CONTINUES. A job enqueued before #10, or a
+ * payload somebody hand-edited, cannot be billed by anybody — and refusing to
+ * settle it would trade an unbilled hop for a row that is `pending` forever,
+ * which is the failure this whole file exists to prevent.
+ *
+ * Returns the refusal reason for a platform-key hop on an unpriced model
+ * (§10.5, "unpriced is not free"). Reached only if a price row is REMOVED
+ * between enqueue and collect — `resolveModel` already refused to start such a
+ * hop — but it is the invariant, so it is checked where the row is written.
+ */
+async function chargeForSuccess(
+  deps: CollectDeps,
+  ctx: JobContext,
+  success: RelaySuccess,
+): Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: string }> {
+  const binding = readBillingBinding(ctx.row.request);
+  if (binding === null) {
+    console.warn("[collector] job has no billing binding; settling unbilled", {
+      id: ctx.row.id,
+      kind: ctx.row.kind,
+    });
+    return { ok: true };
+  }
+  try {
+    await writeCharge(deps.db, {
+      // The PROVIDER AND MODEL THAT RAN, from the result — not the ones the
+      // payload asked for. They are usually the same fact and when they are
+      // not, only one of them is billable.
+      refId: chargeRefId(binding.source, success.provider, success.model, binding.refKey),
+      tenantId: ctx.tenantId,
+      source: binding.source,
+      provider: success.provider,
+      model: success.model,
+      usage: readUsage(success.usage),
+      byok: readByok(ctx.row.request),
+    });
+    return { ok: true };
+  } catch (err) {
+    if (err instanceof UnpricedModelError) {
+      return {
+        ok: false,
+        reason: `sem preço configurado para ${success.provider}/${success.model}; cobrança recusada (§7)`,
+      };
+    }
+    throw err;
+  }
+}
+
+/** The fork, after the money is on the ledger. */
 async function applySuccess(
   deps: CollectDeps,
   ctx: JobContext,
   success: RelaySuccess,
 ): Promise<CollectOutcome> {
+  const charged = await chargeForSuccess(deps, ctx, success);
+  if (!charged.ok) {
+    // Nothing is stored. §7 would rather leave the artifact uncollected — the
+    // result is still in the bucket and re-collectable after a one-line deploy
+    // — than accept it for free.
+    return settle(deps, ctx, terminalFailureStatus(ctx.row.kind), charged.reason);
+  }
   if (ctx.row.kind === "extract") {
     return applyExtractSuccess(deps, ctx, success);
   }
+  if (ctx.row.kind === "analyse") {
+    return applyAnalyseSuccess(deps, ctx, success);
+  }
+  if (ctx.row.kind === "verify") {
+    return applyVerifySuccess(deps, ctx, success);
+  }
+  // `detect`: the result IS the artifact, read on demand by
+  // api/services/detection-service.ts against `documents.detect_job_id`.
   return settle(deps, ctx, "done", null);
 }
 

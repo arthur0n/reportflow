@@ -3,6 +3,9 @@
 // THE FREEZE PROTOCOL, asserted as a protocol and not as a happy path.
 //
 //   * the numeral guard BLOCKS publication (§12.12c) and names slot + token
+//   * a REFUTED claim blocks it too (§12.13), and rewriting the slot is the
+//     way out — the verifier never rewrites, so without that door one
+//     refutation would wedge a report shut forever
 //   * a placeholder never reaches a client document
 //   * S3 is written BEFORE the row is stamped
 //   * the stamp is a compare-and-set, so a second publish reports the first
@@ -14,12 +17,19 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { DbLike } from "../collector/job-state";
+import type * as ReportServiceModule from "./report-service";
 
 const service = vi.hoisted(() => ({
   loadReportBundle: vi.fn(),
-  bindingsOf: vi.fn(),
 }));
-vi.mock("./report-service", () => service);
+// Only the LOADER is stubbed. `reportContextOf` — the §12.12b deterministic
+// half — is deliberately the real one: it is what decides the numerals the
+// guard is allowed to accept, and a stub would be the thing deciding whether
+// the guard blocks.
+vi.mock("./report-service", async (importOriginal) => {
+  const actual = await importOriginal<typeof ReportServiceModule>();
+  return { ...actual, loadReportBundle: service.loadReportBundle };
+});
 
 const { publishReport, renderReport } = await import("./report-publish");
 
@@ -126,15 +136,6 @@ function makeDeps(db: unknown, opts: { frozenHtml?: string | null } = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  service.bindingsOf.mockImplementation((b: ReturnType<typeof bundle>) =>
-    b.roles.map((role) => ({
-      roleKey: role.key,
-      extractions: (b.attached.get(role.key) ?? []).map((a) => ({
-        id: a.extractionId,
-        data: a.data,
-      })),
-    })),
-  );
 });
 
 // ---------------------------------------------------------------------------
@@ -376,5 +377,57 @@ describe("publishReport — concurrent publishers", () => {
     const first = await publishReport(deps, CTX, REPORT_ID);
     const second = await publishReport(deps, CTX, REPORT_ID);
     expect(first.frozenKey).not.toBe(second.frozenKey);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §12.13 — the gate nothing downstream can recompute
+// ---------------------------------------------------------------------------
+
+describe("publishReport — a contested slot", () => {
+  // §12.13. The OTHER hard gate, and the one nothing downstream can
+  // recompute: a refutation is a second model's reading of this prose, not a
+  // function of the data, so it is read from `content_json` where the
+  // collector wrote it.
+  it("BLOCKS on a slot the verifier refuted, quoting its reason", async () => {
+    service.loadReportBundle.mockResolvedValue(
+      bundle({
+        slots: {
+          notas: {
+            text: "Total consolidado: 12300 cêntimos.",
+            edited: false,
+            refuted: [{ claim: "12300 cêntimos", fundamento: "a soma não confere" }],
+          } as never,
+        },
+      }),
+    );
+    const deps = makeDeps(makeDb([{ id: REPORT_ID }]));
+    let caught: unknown;
+    try {
+      await publishReport(deps, CTX, REPORT_ID);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toMatchObject({ code: "BAD_REQUEST" });
+    expect((caught as { message: string }).message).toMatch(/notas.*a soma não confere/u);
+    expect(deps.putFrozen).not.toHaveBeenCalled();
+  });
+
+  // `ilegivel` is not a finding against the prose — the collector never stores
+  // one, and a slot that was verified clean carries only `verifiedAt`.
+  it("publishes a slot the verifier checked and confirmed", async () => {
+    service.loadReportBundle.mockResolvedValue(
+      bundle({
+        slots: {
+          notas: {
+            text: "Total consolidado: 12300 cêntimos.",
+            edited: false,
+            verifiedAt: "2026-08-20T10:00:00.000Z",
+          } as never,
+        },
+      }),
+    );
+    const deps = makeDeps(makeDb([{ id: REPORT_ID }]));
+    await expect(publishReport(deps, CTX, REPORT_ID)).resolves.toMatchObject({ published: true });
   });
 });
