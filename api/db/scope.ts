@@ -30,32 +30,9 @@ const TABLE_SCOPE: Record<string, ScopeType> = {
 
   // Tenant-scoped domain tables
   tenant_values: { type: "tenant", softDelete: true },
-  transactions: { type: "tenant", softDelete: true },
-  transaction_recurrences: { type: "tenant", softDelete: true },
 
   // Audit trail (tenant-scoped, append-only — no soft-delete)
   audit_logs: { type: "tenant", softDelete: false },
-
-  // Import tables (status-machine lifecycle, no soft-delete)
-  statement_imports: { type: "tenant", softDelete: false },
-  statement_import_rows: { type: "tenant", softDelete: false },
-  statement_import_events: { type: "tenant", softDelete: false },
-
-  // G-02 conciliation ledger — soft-delete = user ignored the row
-  acquirer_sales: { type: "tenant", softDelete: true },
-  // G-02 match links — hard-deleted on unmatch, audit_logs keeps history
-  acquirer_sale_settlements: { type: "tenant", softDelete: false },
-
-  // Import auto-match engine
-  // Decisions: append-only learning log, tenant-scoped.
-  import_match_decisions: { type: "tenant", softDelete: false },
-  // Rules: dual-scope (system + tenant) like list_of_values, so the RuleMatcher
-  // composes its own (tenant_id IS NULL OR tenant_id = ?) filter rather than
-  // having scope.conditions() apply a single-tenant rule.
-  import_match_rules: { type: "lov" },
-
-  // Dev tooling (shared across all users — temporary, remove post-MVP)
-  questions_and_feedback: { type: "global", softDelete: true },
 };
 
 type ScopeOptions = {

@@ -11,15 +11,14 @@
 
 import { z } from "zod/v4";
 import { TRPCError } from "@trpc/server";
-import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { router, protectedProcedure } from "../procedures";
 import { db } from "../../db/client";
-import { listOfValues, tenantValues, transactions } from "../../../drizzle/schema";
+import { listOfValues, tenantValues } from "../../../drizzle/schema";
 import {
   CreateTenantValueInput,
   TenantValuesListInput,
-  TenantValuesTransactionsCountInput,
   UpdateTenantValueInput,
 } from "../../../shared/validation/tenant-value-schemas";
 import {
@@ -200,49 +199,6 @@ async function validateAndResolveBankSlugId(
   return requested;
 }
 
-function txColumnFor(kind: TenantValueKind) {
-  const col = TENANT_VALUE_KIND_CONFIG[kind].txColumn;
-  if (col === "creditorId") return transactions.creditorId;
-  if (col === "cashBoxId") return transactions.cashBoxId;
-  if (col === "businessUnitId") return transactions.businessUnitId;
-  return null;
-}
-
-async function transactionsCountByIds(
-  tx: DbLike,
-  tenantId: string,
-  kind: TenantValueKind,
-  ids: string[],
-): Promise<Map<string, { activeCount: number; inactiveCount: number }>> {
-  const column = txColumnFor(kind);
-  if (column === null) return new Map();
-
-  const rows = await tx
-    .select({
-      id: column,
-      activeCount: sql<number>`count(*) filter (where ${transactions.deletedAt} is null)`.as(
-        "active_count",
-      ),
-      inactiveCount: sql<number>`count(*) filter (where ${transactions.deletedAt} is not null)`.as(
-        "inactive_count",
-      ),
-    })
-    .from(transactions)
-    .where(and(eq(transactions.tenantId, tenantId), inArray(column, ids)))
-    .groupBy(column);
-
-  const byId = new Map<string, { activeCount: number; inactiveCount: number }>();
-  for (const r of rows) {
-    if (r.id !== null) {
-      byId.set(r.id, {
-        activeCount: Number(r.activeCount),
-        inactiveCount: Number(r.inactiveCount),
-      });
-    }
-  }
-  return byId;
-}
-
 export const tenantValuesRouter = router({
   list: protectedProcedure.input(TenantValuesListInput).query(async ({ ctx, input }) => {
     const conds = tenantValuesListConditions(
@@ -323,7 +279,6 @@ export const tenantValuesRouter = router({
     return db.transaction(async (tx) => {
       const kind = await findKindOf(tx, ctx.tenantId, input.id);
       const cfg = crudCfgFor(kind);
-      const kindCfg = TENANT_VALUE_KIND_CONFIG[kind];
 
       const current = await tenantValuesById(
         tx,
@@ -334,18 +289,6 @@ export const tenantValuesRouter = router({
       if (!current) throw new TRPCError({ code: "NOT_FOUND" });
 
       const { wantsChange, newParentLov } = await resolveNewParent(tx, ctx.tenantId, kind, input);
-      const parentChanged = wantsChange && newParentLov !== current.parentLov;
-
-      if (parentChanged && kindCfg.parentLockedAfterUse) {
-        const counts = await transactionsCountByIds(tx, ctx.tenantId, kind, [input.id]);
-        const c = counts.get(input.id);
-        if (c !== undefined && (c.activeCount > 0 || c.inactiveCount > 0)) {
-          throw new TRPCError({
-            code: "BAD_REQUEST",
-            message: "Tipo imutável após primeiro uso.",
-          });
-        }
-      }
 
       const finalParent = wantsChange ? newParentLov : current.parentLov;
       const finalBankInput = input.bankSlugId === undefined ? current.bankSlugId : input.bankSlugId;
@@ -381,15 +324,4 @@ export const tenantValuesRouter = router({
       return tenantValuesRestore(tx, { tenantId: ctx.tenantId, userId: ctx.userId }, cfg, id);
     });
   }),
-
-  transactionsCount: protectedProcedure
-    .input(TenantValuesTransactionsCountInput)
-    .query(async ({ ctx, input }) => {
-      const counts = await transactionsCountByIds(ctx.db.raw, ctx.tenantId, input.kind, input.ids);
-      return input.ids.map((id) => ({
-        id,
-        activeCount: counts.get(id)?.activeCount ?? 0,
-        inactiveCount: counts.get(id)?.inactiveCount ?? 0,
-      }));
-    }),
 });

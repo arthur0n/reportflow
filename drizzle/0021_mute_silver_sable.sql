@@ -1,2 +1,0 @@
-ALTER TABLE "import_match_decisions" ALTER COLUMN "proposed_by_strategy" SET DATA TYPE varchar(64);--> statement-breakpoint
-ALTER TABLE "statement_import_rows" ALTER COLUMN "source_strategy" SET DATA TYPE varchar(64);

@@ -1,1 +1,0 @@
-ALTER TABLE "statement_imports" ADD COLUMN "rows_duplicate" integer DEFAULT 0 NOT NULL;

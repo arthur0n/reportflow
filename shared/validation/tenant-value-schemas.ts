@@ -45,11 +45,6 @@ export const UpdateTenantValueInput = z.object({
   bankSlugId: z.string().uuid().nullable().optional(),
 });
 
-export const TenantValuesTransactionsCountInput = z.object({
-  kind: TenantValueKindZ,
-  ids: z.array(z.string().uuid()).min(1).max(200),
-});
-
 export type CreateTenantValueInputT = z.infer<typeof CreateTenantValueInput>;
 export type UpdateTenantValueInputT = z.infer<typeof UpdateTenantValueInput>;
 export type TenantValuesListInputT = z.infer<typeof TenantValuesListInput>;

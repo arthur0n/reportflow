@@ -34,11 +34,6 @@ export function DeactivateTenantValueDialog({
   const cfg = TENANT_VALUE_KIND_CONFIG[kind];
   const labelLower = cfg.labelOne.toLowerCase();
 
-  const countQuery = trpc.tenantValues.transactionsCount.useQuery(
-    tenantValue ? { kind, ids: [tenantValue.id] } : { kind, ids: [""] },
-    { enabled: tenantValue !== null && open && cfg.txColumn !== null },
-  );
-
   const deactivate = trpc.tenantValues.deactivate.useMutation({
     onSuccess: () => {
       void utils.tenantValues.invalidate();
@@ -50,9 +45,6 @@ export function DeactivateTenantValueDialog({
     },
   });
 
-  const counts = countQuery.data?.[0] ?? { activeCount: 0, inactiveCount: 0 };
-  const showImpact = cfg.txColumn !== null;
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
@@ -63,20 +55,8 @@ export function DeactivateTenantValueDialog({
         </DialogHeader>
         <div className="flex flex-col gap-3">
           <p className="text-[length:var(--fs-body-sm)] text-[color:var(--ink-soft)]">
-            {cfg.labelOne}s inativos não aparecem em dropdowns de novas transações. Transações já
-            lançadas continuam vinculadas normalmente.
+            {cfg.labelOne}s inativos não aparecem em dropdowns para novos registros.
           </p>
-          {showImpact && (
-            <p className="text-[length:var(--fs-body-sm)] text-[color:var(--ink-soft)]">
-              {countQuery.isLoading
-                ? "Carregando impacto…"
-                : counts.activeCount === 0 && counts.inactiveCount === 0
-                  ? `Nenhuma transação referencia este ${labelLower}.`
-                  : `Este ${labelLower} está em ${counts.activeCount} transação(ões) ativa(s)` +
-                    (counts.inactiveCount > 0 ? ` e ${counts.inactiveCount} inativa(s)` : "") +
-                    "."}
-            </p>
-          )}
         </div>
         <DialogFooter>
           <Button

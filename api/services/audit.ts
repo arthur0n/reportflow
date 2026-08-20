@@ -17,9 +17,6 @@ export type AuditAction =
   | "delete"
   | "restore"
   | "reclassify"
-  // G-02 conciliation: sale ↔ deposit link written/removed on acquirer_sales.
-  | "match"
-  | "unmatch"
   // Tenant LOV row → system row. Triggered by admin manual promote OR by an
   // auto-promote when a second tenant tries to create the same code.
   | "promote_to_system"

@@ -1,3 +1,0 @@
-ALTER TABLE "statement_import_rows" ADD COLUMN "business_unit_id" uuid;--> statement-breakpoint
-ALTER TABLE "statement_import_rows" ADD COLUMN "reference" varchar(80);--> statement-breakpoint
-ALTER TABLE "statement_import_rows" ADD CONSTRAINT "statement_import_rows_business_unit_id_tenant_values_id_fk" FOREIGN KEY ("business_unit_id") REFERENCES "public"."tenant_values"("id") ON DELETE no action ON UPDATE no action;

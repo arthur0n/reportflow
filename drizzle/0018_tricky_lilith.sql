@@ -1,2 +1,0 @@
-ALTER TABLE "tenant_values" ADD COLUMN "bank_slug_id" uuid;--> statement-breakpoint
-ALTER TABLE "tenant_values" ADD CONSTRAINT "tenant_values_bank_slug_id_list_of_values_id_fk" FOREIGN KEY ("bank_slug_id") REFERENCES "public"."list_of_values"("id") ON DELETE no action ON UPDATE no action;

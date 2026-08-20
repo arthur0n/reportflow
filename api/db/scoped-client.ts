@@ -22,10 +22,6 @@ import {
   type memberships,
   type tenants,
   type tenantValues,
-  type transactions,
-  type importMatchRules,
-  type questionsAndFeedback,
-  type acquirerSales,
 } from "../../drizzle/schema";
 import { createScopedDb as createLegacyScope, withSystemFields } from "./scope";
 
@@ -54,14 +50,7 @@ export type UpdateInput<T extends PgTable> = Partial<Omit<T["$inferInsert"], Sys
 // that ctx.db.softDelete(...) is only callable on tables that actually have
 // deleted_at. A forgotten match is a compile error at the call site.
 export type SoftDeletableTable =
-  | typeof tenants
-  | typeof memberships
-  | typeof tenantValues
-  | typeof transactions
-  | typeof listOfValues
-  | typeof importMatchRules
-  | typeof questionsAndFeedback
-  | typeof acquirerSales;
+  typeof tenants | typeof memberships | typeof tenantValues | typeof listOfValues;
 
 /** A drizzle transaction handle (the arg passed into db.transaction's callback). */
 export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];

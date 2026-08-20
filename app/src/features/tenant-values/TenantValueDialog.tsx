@@ -72,16 +72,6 @@ export function TenantValueDialog({
 
   const showBank = bankPickerVisible(kind, parentValue);
 
-  const txCountQuery = trpc.tenantValues.transactionsCount.useQuery(
-    tenantValue ? { kind, ids: [tenantValue.id] } : { kind, ids: [""] },
-    { enabled: isEdit && open && cfg.parentLockedAfterUse },
-  );
-  const txCount = txCountQuery.data?.[0];
-  const parentLocked =
-    cfg.parentLockedAfterUse &&
-    txCount !== undefined &&
-    (txCount.activeCount > 0 || txCount.inactiveCount > 0);
-
   useEffect(() => {
     if (!open) return;
     if (tenantValue) {
@@ -244,7 +234,6 @@ export function TenantValueDialog({
             parentValue={parentValue}
             setParentValue={setParentValue}
             parentOptions={parentOptions.items}
-            parentLocked={parentLocked}
             bankSlugId={bankSlugId}
             setBankSlugId={setBankSlugId}
             bankOptions={[...bankOptions.items].sort((a, b) =>
@@ -276,7 +265,6 @@ function FormBody(props: {
   parentValue: string;
   setParentValue: (v: string) => void;
   parentOptions: LovOpt[];
-  parentLocked: boolean;
   bankSlugId: string;
   setBankSlugId: (v: string) => void;
   bankOptions: LovOpt[];
@@ -296,7 +284,6 @@ function FormBody(props: {
     parentValue,
     setParentValue,
     parentOptions,
-    parentLocked,
     bankSlugId,
     setBankSlugId,
     bankOptions,
@@ -335,7 +322,6 @@ function FormBody(props: {
               setParentValue(next);
               if (!bankPickerVisible(kind, next)) setBankSlugId(NO_BANK);
             }}
-            disabled={parentLocked}
           >
             <SelectTrigger id="tv-parent">
               <SelectValue placeholder={cfg.parent.required ? "Selecione" : "Nenhuma"} />
@@ -352,11 +338,6 @@ function FormBody(props: {
               ))}
             </SelectContent>
           </Select>
-          {parentLocked && (
-            <p className="text-[length:var(--fs-body-sm)] text-[color:var(--ink-mute)]">
-              Tipo imutável após primeiro uso.
-            </p>
-          )}
         </div>
       )}
 

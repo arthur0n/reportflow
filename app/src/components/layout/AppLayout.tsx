@@ -1,5 +1,5 @@
 import { useState, type ReactElement, type ReactNode } from "react";
-import { Link, Redirect, useLocation } from "wouter";
+import { Link, useLocation } from "wouter";
 import { UserMenu } from "@/auth";
 import { ChevronDown, Menu, X } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -35,20 +35,11 @@ type NavItem =
 
 const NAV_ITEMS: readonly NavItem[] = [
   { kind: "link", href: "/dashboard", label: "Painel" },
-  { kind: "link", href: "/transactions", label: "Transações" },
-  { kind: "link", href: "/imports", label: "Importações" },
-  { kind: "link", href: "/conciliation", label: "Conciliação" },
-  { kind: "link", href: "/reports", label: "Relatórios" },
   {
     kind: "group",
     label: "Parâmetros",
-    matchPrefixes: ["/parameters", "/categories"],
+    matchPrefixes: ["/parameters"],
     groups: [
-      [
-        { href: "/categories", label: "Categorias" },
-        { href: "/parameters/payment-methods", label: "Formas de Pagamento" },
-        { href: "/parameters/import-rules", label: "Regras de Importação" },
-      ],
       [
         { href: "/parameters/tenant-values/business-unit", label: "Unidades" },
         { href: "/parameters/tenant-values/supplier", label: "Fornecedores" },
@@ -57,7 +48,6 @@ const NAV_ITEMS: readonly NavItem[] = [
       ],
     ],
   },
-  { kind: "link", href: "/feedback", label: "Feedback" },
   { kind: "link", href: "/settings/tenant", label: "Configurações" },
   {
     kind: "group",
@@ -69,31 +59,15 @@ const NAV_ITEMS: readonly NavItem[] = [
         { href: "/admin/customers/new", label: "Novo cliente" },
         { href: "/admin/lov", label: "Catálogo LOV" },
         { href: "/admin/lov-candidates", label: "Candidatos LOV" },
-        { href: "/admin/match-rules-system", label: "Regras de Sistema" },
       ],
     ],
   },
 ];
 
-// Surfaces available while the tenant is in import-only mode: the imports +
-// conciliation flow, plus settings so the admin can graduate to full mode.
-const IMPORT_ONLY_PREFIXES = ["/imports", "/conciliation", "/settings/tenant"] as const;
-
-function isImportOnlyAllowed(href: string): boolean {
-  return IMPORT_ONLY_PREFIXES.some((p) => href === p || href.startsWith(`${p}/`));
-}
-
-function visibleNavItems(
-  items: readonly NavItem[],
-  role: number | null,
-  tenantMode: string | null,
-): readonly NavItem[] {
-  const byRank =
-    role === null
-      ? items.filter((item) => item.requiredRank === undefined)
-      : items.filter((item) => item.requiredRank === undefined || role <= item.requiredRank);
-  if (tenantMode !== "import_only") return byRank;
-  return byRank.filter((item) => item.kind === "link" && isImportOnlyAllowed(item.href));
+function visibleNavItems(items: readonly NavItem[], role: number | null): readonly NavItem[] {
+  return role === null
+    ? items.filter((item) => item.requiredRank === undefined)
+    : items.filter((item) => item.requiredRank === undefined || role <= item.requiredRank);
 }
 
 function isActivePath(href: string, location: string): boolean {
@@ -113,14 +87,7 @@ export function AppLayout({ children }: { children: ReactNode }): ReactElement {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const me = trpc.users.me.useQuery(undefined, { staleTime: 60_000 });
   const { period, setPeriod } = usePeriod();
-  const tenantMode = me.data?.activeTenantMode ?? null;
-  const navItems = visibleNavItems(NAV_ITEMS, me.data?.role ?? null, tenantMode);
-
-  // AppLayout wraps every protected page, so this is the single route gate
-  // for import-only mode: anything outside the whitelist bounces to imports.
-  if (tenantMode === "import_only" && !isImportOnlyAllowed(location)) {
-    return <Redirect to="/imports" />;
-  }
+  const navItems = visibleNavItems(NAV_ITEMS, me.data?.role ?? null);
 
   return (
     <div className="min-h-screen bg-[color:var(--paper)]">

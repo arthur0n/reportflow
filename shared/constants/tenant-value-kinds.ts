@@ -3,8 +3,7 @@
 // Per-kind behavior config for tenant_values rows. The TENANT_VALUES LOV
 // registry supplies the user-facing plural label and description; this config
 // supplies the rest: which LOV the parent points at, whether parent is
-// required, whether it locks after first transaction, the singular form, and
-// which transactions column references rows of this kind.
+// required, and the singular form.
 //
 // Adding a new kind: insert a row into the TENANT_VALUES LOV registry
 // (scripts/seed.ts) AND a config entry here. The router and UI dispatch off
@@ -21,8 +20,6 @@ export type ParentRule =
 export type TenantValueKindConfig = {
   kind: TenantValueKind;
   parent: ParentRule;
-  /** True if parent_lov can no longer change once any transaction references this row (RN-7 for CASH_BOX). */
-  parentLockedAfterUse: boolean;
   /** pt-BR singular noun used for "Novo X" buttons; plural comes from the TENANT_VALUES LOV row. */
   labelOne: string;
   /** pt-BR label for the parent field/column (e.g. "Categoria padrão", "Tipo"). null when parent.source === "none". */
@@ -31,50 +28,40 @@ export type TenantValueKindConfig = {
   urlSlug: string;
   /** Whether the create/edit form shows the description field. */
   showDescription: boolean;
-  /** Which transactions column FKs to this kind (drives transactionsCount and the lock check). null = no transactions reference. */
-  txColumn: "creditorId" | "cashBoxId" | "businessUnitId" | null;
 };
 
 export const TENANT_VALUE_KIND_CONFIG: Record<TenantValueKind, TenantValueKindConfig> = {
   SUPPLIER: {
     kind: "SUPPLIER",
     parent: { source: "lov-tenant", lovType: "CATEGORY", required: false },
-    parentLockedAfterUse: false,
     labelOne: "Fornecedor",
     parentLabel: "Categoria padrão",
     urlSlug: "supplier",
     showDescription: true,
-    txColumn: "creditorId",
   },
   CUSTOMER: {
     kind: "CUSTOMER",
     parent: { source: "lov-tenant", lovType: "CATEGORY", required: false },
-    parentLockedAfterUse: false,
     labelOne: "Cliente",
     parentLabel: "Categoria padrão",
     urlSlug: "customer",
     showDescription: true,
-    txColumn: "creditorId",
   },
   CASH_BOX: {
     kind: "CASH_BOX",
     parent: { source: "lov-system", lovType: "CASH_BOX_TYPE", required: true },
-    parentLockedAfterUse: true,
     labelOne: "Caixa",
     parentLabel: "Tipo",
     urlSlug: "cash-box",
     showDescription: false,
-    txColumn: "cashBoxId",
   },
   BUSINESS_UNIT: {
     kind: "BUSINESS_UNIT",
     parent: { source: "lov-system", lovType: "BUSINESS_UNIT_TYPE", required: true },
-    parentLockedAfterUse: false,
     labelOne: "Unidade",
     parentLabel: "Tipo",
     urlSlug: "business-unit",
     showDescription: true,
-    txColumn: "businessUnitId",
   },
 };
 

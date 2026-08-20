@@ -8,30 +8,13 @@ Parameters:
     Default: prod
     AllowedValues: [dev, prod]
 
-# Timeout covers the async import-processing invoke (parse + matcher chain
-# over thousands of rows); HTTP requests still cut off at API Gateway's ~30s.
 Globals:
   Function:
-    Timeout: 300
+    Timeout: 30
     MemorySize: 1024
     Runtime: nodejs24.x
 
 Resources:
-  ReportFlowUploadsBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Sub "reportflow-uploads-${Environment}-${AWS::AccountId}"
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      LifecycleConfiguration:
-        Rules:
-          - Id: expire-raw-uploads
-            Status: Enabled
-            ExpirationInDays: 90
-
   ReportFlowApiLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -96,12 +79,6 @@ Resources:
           CLERK_SECRET_KEY: !Sub "{{resolve:ssm:/reportflow/api/${Environment}/clerk-secret-key}}"
           APP_URL: !Sub "{{resolve:ssm:/reportflow/api/${Environment}/app-url}}"
           ENVIRONMENT: !Ref Environment
-          # Fixed name (not !Ref) — referencing the bucket resource from the
-          # function that also receives its notifications is a circular dep.
-          UPLOADS_BUCKET: !Sub "reportflow-uploads-${Environment}-${AWS::AccountId}"
-      Policies:
-        - S3CrudPolicy:
-            BucketName: !Sub "reportflow-uploads-${Environment}-${AWS::AccountId}"
       Events:
         ApiEvent:
           Type: HttpApi
@@ -109,18 +86,6 @@ Resources:
             ApiId: !Ref ReportFlowHttpApi
             Path: /{proxy+}
             Method: ANY
-        # S3 invokes the function from outside the VPC, so processing needs
-        # no NAT/Lambda endpoint — the VPC's only AWS route is the S3 gateway.
-        UploadCreated:
-          Type: S3
-          Properties:
-            Bucket: !Ref ReportFlowUploadsBucket
-            Events: s3:ObjectCreated:*
-            Filter:
-              S3Key:
-                Rules:
-                  - Name: prefix
-                    Value: uploads/
 
 Outputs:
   ApiGatewayUrl:
