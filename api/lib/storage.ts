@@ -24,7 +24,7 @@
 // the checks below re-affirming it.
 
 import { randomUUID } from "node:crypto";
-import { S3Client, HeadObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, GetObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { createPresignedPost } from "@aws-sdk/s3-presigned-post";
 import { assertOwnedKey, assertPlainKey } from "./object-keys";
 
@@ -120,6 +120,64 @@ export async function headDocument(key: string): Promise<DocumentHead | null> {
     const res = await s3.send(new HeadObjectCommand({ Bucket: docsBucket(), Key: key }));
     return { size: res.ContentLength ?? 0, contentType: res.ContentType };
   } catch (err) {
+    const name = typeof err === "object" && err !== null ? (err as { name?: unknown }).name : "";
+    if (name === "NotFound" || name === "NoSuchKey") {
+      return null;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Thrown by `getDocumentBytes` for an object over `MAX_UPLOAD_BYTES` — a
+ * fact about the object, not a missing-object outcome, so it is a throw
+ * rather than folded into the `null` case.
+ */
+export class DocumentTooLargeError extends Error {
+  override readonly name = "DocumentTooLargeError";
+}
+
+/**
+ * Reads a tenant document's bytes, or `null` if it is not there.
+ *
+ * Tier 1 detection (decisions §3.3, §12.2) needs the whole PDF, not a range:
+ * page-1 text extraction is done LOCALLY in this Lambda by a bundled JS
+ * library (api/detection/page-text.ts) rather than over a relay hop, and that
+ * only works if the bytes are already in hand. The `TenantDocumentsReadWrite`
+ * grant in template.yaml (`s3:GetObject` on `org_*`) is what makes this call
+ * reachable without leaving the VPC — the free S3 gateway endpoint, no NAT.
+ *
+ * `assertPlainKey` only proves shape, not ownership — same split as
+ * `headDocument`. Every caller here already reached `key` through a tenant-
+ * scoped `documents` row, so re-deriving ownership from the key itself would
+ * just repeat a check the row lookup already made.
+ *
+ * CAPPED AT `MAX_UPLOAD_BYTES` (§12.5's own upload cap — an object under a
+ * tenant's own key can never legitimately exceed it), checked BEFORE the body
+ * is streamed. Same reasoning as `MAX_RESULT_BYTES` in api/lib/relay.ts: the
+ * point of a cap is not to reject an oversized buffer after paying to build
+ * it in this Lambda's memory. The decoded length is re-checked afterwards as
+ * a backstop for a missing or lying `Content-Length`.
+ */
+export async function getDocumentBytes(key: string): Promise<Buffer | null> {
+  assertPlainKey(key, "key");
+  try {
+    const res = await s3.send(new GetObjectCommand({ Bucket: docsBucket(), Key: key }));
+    if (res.Body === undefined) {
+      return null;
+    }
+    if ((res.ContentLength ?? 0) > MAX_UPLOAD_BYTES) {
+      throw new DocumentTooLargeError(`document exceeds ${String(MAX_UPLOAD_BYTES)} bytes`);
+    }
+    const bytes = await res.Body.transformToByteArray();
+    if (bytes.length > MAX_UPLOAD_BYTES) {
+      throw new DocumentTooLargeError(`document exceeds ${String(MAX_UPLOAD_BYTES)} bytes`);
+    }
+    return Buffer.from(bytes);
+  } catch (err) {
+    if (err instanceof DocumentTooLargeError) {
+      throw err;
+    }
     const name = typeof err === "object" && err !== null ? (err as { name?: unknown }).name : "";
     if (name === "NotFound" || name === "NoSuchKey") {
       return null;

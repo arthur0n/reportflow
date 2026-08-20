@@ -19,11 +19,13 @@ import { TRPCError } from "@trpc/server";
 const storage = vi.hoisted(() => ({
   createPresignedUploadUrl: vi.fn(),
   headDocument: vi.fn(),
+  getDocumentBytes: vi.fn(),
 }));
 
 vi.mock("../../lib/storage", () => ({
   createPresignedUploadUrl: storage.createPresignedUploadUrl,
   headDocument: storage.headDocument,
+  getDocumentBytes: storage.getDocumentBytes,
   MAX_UPLOAD_BYTES: 26_214_400,
   REQUIRED_CONTENT_TYPE: "application/pdf",
 }));
@@ -36,10 +38,31 @@ const crud = vi.hoisted(() => ({
 
 vi.mock("../../services/documents-crud", () => crud);
 
+// The detection service (api/detection/*, api/services/detection-service.ts)
+// is proven in its own suites — this router test only proves the WIRING:
+// which input reaches which service call, and that the service's return
+// value is what the client gets back.
+const detectionService = vi.hoisted(() => ({
+  runDetection: vi.fn(),
+  applyDetectionResult: vi.fn(),
+  setDocumentTypeManually: vi.fn(),
+}));
+
+vi.mock("../../services/detection-service", () => detectionService);
+
+const relay = vi.hoisted(() => ({ enqueueRelayJob: vi.fn() }));
+vi.mock("../../lib/relay", () => relay);
+
+const classifyJob = vi.hoisted(() => ({ loadClassifiableTypes: vi.fn() }));
+vi.mock("../../detection/classify-job", () => classifyJob);
+
 const { appRouter } = await import("../router");
 
 const TENANT = "org-1";
 const OTHER_TENANT = "org-2";
+const DOC_ID = "22222222-2222-4222-8222-222222222222";
+const DOC_TYPE_ID = "55555555-5555-4555-8555-555555555555";
+const REPORT_JOB_ID = "44444444-4444-4444-8444-444444444444";
 
 function callerFor(tenantId: string) {
   return appRouter.createCaller({ tenantId, userId: "user-1", role: "member" });
@@ -48,9 +71,28 @@ function callerFor(tenantId: string) {
 beforeEach(() => {
   storage.createPresignedUploadUrl.mockReset();
   storage.headDocument.mockReset();
+  storage.getDocumentBytes.mockReset();
   crud.assertReferencesOwnedByTenant.mockReset().mockResolvedValue(undefined);
   crud.insertDocumentIdempotent.mockReset();
   crud.listDocuments.mockReset();
+  detectionService.runDetection.mockReset();
+  detectionService.applyDetectionResult.mockReset();
+  detectionService.setDocumentTypeManually.mockReset();
+  relay.enqueueRelayJob.mockReset();
+  classifyJob.loadClassifiableTypes.mockReset();
+});
+
+describe("documents.documentTypes", () => {
+  it("maps the tenant's classifiable types to {id, label} for the dropdown", async () => {
+    classifyJob.loadClassifiableTypes.mockResolvedValue([
+      { documentTypeId: DOC_TYPE_ID, label: "Toysmith / Nota Fiscal", hints: ["TOYSMITH"] },
+    ]);
+
+    const out = await callerFor(TENANT).documents.documentTypes();
+
+    expect(out).toEqual([{ id: DOC_TYPE_ID, label: "Toysmith / Nota Fiscal" }]);
+    expect(classifyJob.loadClassifiableTypes).toHaveBeenCalledWith(expect.anything(), TENANT);
+  });
 });
 
 describe("documents.presignUpload", () => {
@@ -158,6 +200,87 @@ describe("documents.list", () => {
   });
 });
 
+describe("documents.detect", () => {
+  it("passes the input document id and the caller's tenant/user through to the service", async () => {
+    detectionService.runDetection.mockResolvedValue({
+      outcome: "hint",
+      documentTypeId: DOC_TYPE_ID,
+    });
+
+    const out = await callerFor(TENANT).documents.detect({ documentId: DOC_ID });
+
+    expect(out).toEqual({ outcome: "hint", documentTypeId: DOC_TYPE_ID });
+    expect(detectionService.runDetection).toHaveBeenCalledOnce();
+    const [depsArg, ctxArg, documentIdArg] = detectionService.runDetection.mock.calls[0] as [
+      { enqueue: unknown; fetchPdf: unknown },
+      { tenantId: string; userId: string },
+      string,
+    ];
+    expect(ctxArg).toEqual({ tenantId: TENANT, userId: "user-1" });
+    expect(documentIdArg).toBe(DOC_ID);
+    expect(depsArg.enqueue).toBe(relay.enqueueRelayJob);
+    expect(depsArg.fetchPdf).toBe(storage.getDocumentBytes);
+  });
+
+  it("propagates a NOT_FOUND from the service unchanged", async () => {
+    detectionService.runDetection.mockRejectedValue(
+      new TRPCError({ code: "NOT_FOUND", message: "Documento não encontrado." }),
+    );
+    await expect(callerFor(TENANT).documents.detect({ documentId: DOC_ID })).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+  });
+});
+
+describe("documents.applyDetection", () => {
+  it("resolves a finished tier-2 job for the caller's own tenant", async () => {
+    detectionService.applyDetectionResult.mockResolvedValue({
+      outcome: "applied",
+      documentTypeId: DOC_TYPE_ID,
+    });
+
+    const out = await callerFor(TENANT).documents.applyDetection({ jobId: REPORT_JOB_ID });
+
+    expect(out).toEqual({ outcome: "applied", documentTypeId: DOC_TYPE_ID });
+    expect(detectionService.applyDetectionResult).toHaveBeenCalledWith(
+      expect.anything(),
+      { tenantId: TENANT, userId: "user-1" },
+      REPORT_JOB_ID,
+    );
+  });
+});
+
+describe("documents.setDocumentType", () => {
+  it("calls the service with the caller's tenant and returns ok", async () => {
+    detectionService.setDocumentTypeManually.mockResolvedValue(undefined);
+
+    const out = await callerFor(TENANT).documents.setDocumentType({
+      documentId: DOC_ID,
+      documentTypeId: DOC_TYPE_ID,
+    });
+
+    expect(out).toEqual({ ok: true });
+    expect(detectionService.setDocumentTypeManually).toHaveBeenCalledWith(
+      expect.anything(),
+      { tenantId: TENANT, userId: "user-1" },
+      DOC_ID,
+      DOC_TYPE_ID,
+    );
+  });
+
+  it("propagates a BAD_REQUEST the service raises for an invalid documentTypeId", async () => {
+    detectionService.setDocumentTypeManually.mockRejectedValue(
+      new TRPCError({ code: "BAD_REQUEST", message: "Tipo de documento inválido." }),
+    );
+    await expect(
+      callerFor(TENANT).documents.setDocumentType({
+        documentId: DOC_ID,
+        documentTypeId: "99999999-9999-4999-8999-999999999999",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+});
+
 describe("the procedure tier", () => {
   it("refuses every documents procedure for an unauthenticated caller", async () => {
     const caller = appRouter.createCaller({ tenantId: null, userId: null, role: null });
@@ -166,6 +289,18 @@ describe("the procedure tier", () => {
     });
     await expect(caller.documents.list()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
     await expect(caller.documents.confirmUpload({ key: "x/y.pdf" })).rejects.toMatchObject({
+      code: "UNAUTHORIZED",
+    });
+    await expect(caller.documents.detect({ documentId: DOC_ID })).rejects.toMatchObject({
+      code: "UNAUTHORIZED",
+    });
+    await expect(caller.documents.applyDetection({ jobId: REPORT_JOB_ID })).rejects.toMatchObject({
+      code: "UNAUTHORIZED",
+    });
+    await expect(
+      caller.documents.setDocumentType({ documentId: DOC_ID, documentTypeId: DOC_TYPE_ID }),
+    ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(caller.documents.documentTypes()).rejects.toMatchObject({
       code: "UNAUTHORIZED",
     });
   });

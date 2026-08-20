@@ -17,6 +17,7 @@ import {
   timestamp,
   uniqueIndex,
   check,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { TENANT_ID_LENGTH } from "./common";
 import { documentTypes, extractTemplates } from "./calibration";
@@ -71,6 +72,18 @@ export const clients = pgTable(
 // `detected_by` records which of the three §3.3 tiers produced the type:
 // 'hint' (free substring match), 'model' (one cheap classification hop), or
 // 'manual' (the always-present, always-correctable dropdown).
+//
+// `detect_job_id` is the CURRENCY GUARD for tier 2 (codex review, 2026-08-20):
+// it names the most recently enqueued `detect` job for this document. A
+// second `documents.detect` call while one is still pending reuses that job
+// rather than enqueueing a duplicate (api/services/detection-service.ts
+// `loadPendingDetectJob`); resolving a job's result checks
+// `job.id === documents.detect_job_id` first, so an OLDER job that finishes
+// late — after a newer job, or after tier 1/manual already answered — is
+// rejected as stale instead of overwriting a newer answer. FK to
+// `report_jobs.id` (forward-referenced via a lazy callback: report_jobs is
+// declared later in this same file) rather than a bare uuid, so a stale id
+// can never point at a row that was never actually a job.
 // ---------------------------------------------------------------------------
 
 export const documents = pgTable(
@@ -88,6 +101,7 @@ export const documents = pgTable(
     // NULL until detection runs; always correctable before extraction (§3.3).
     documentTypeId: uuid("document_type_id").references(() => documentTypes.id),
     detectedBy: varchar("detected_by", { length: 10 }),
+    detectJobId: uuid("detect_job_id").references((): AnyPgColumn => reportJobs.id),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
