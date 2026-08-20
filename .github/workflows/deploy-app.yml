@@ -3,17 +3,10 @@ name: Deploy App
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Deploy disabled until Phase 0 (AWS role/RDS/SSM/Clerk) exists — re-enable the
+# push trigger then. Manual runs only for now.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "app/**"
-      - "shared/**"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "vite.config.ts"
-      - "tsconfig.json"
-      - ".github/workflows/deploy-app.yml"
+  workflow_dispatch:
   workflow_dispatch:
 
 permissions:

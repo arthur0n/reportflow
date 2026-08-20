@@ -3,18 +3,10 @@ name: Deploy API
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Deploy disabled until Phase 0 (AWS role/RDS/SSM/Clerk) exists — re-enable the
+# push trigger then. Manual runs only for now.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "api/**"
-      - "drizzle/**"
-      - "shared/**"
-      - "template.yaml"
-      - "samconfig.toml"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - ".github/workflows/deploy-api.yml"
+  workflow_dispatch:
   workflow_dispatch:
 
 permissions:
